@@ -2,7 +2,7 @@ import os
 
 # Files/Folders to ignore
 IGNORE_DIRS = {'.git', '__pycache__', 'node_modules', 'venv', '.idea', '.vscode', 'build', 'dist'}
-IGNORE_EXTS = {'.pyc', '.exe', '.dll', '.so', '.zip', '.png', '.jpg', '.jpeg'}
+IGNORE_EXTS = {'.pyc', '.exe', '.dll', '.so', '.zip', '.png', '.jpg', '.jpeg', '.ts', '.json'}
 OUTPUT_FILE = "_project_context.txt"
 
 def merge_files():

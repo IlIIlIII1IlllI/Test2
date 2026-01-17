@@ -1,10 +1,9 @@
 /*
- * PaintByNumbersGenerator – Runtime PDF Mixing Guide v2.3 (Unified Sorting)
+ * PaintByNumbersGenerator – Runtime PDF Mixing Guide v2.5 (Fix Area Updates)
  * 
  * Updates:
- * - Table 1 (Summary) is now sorted by Pigment Families (same as Mixing Guide).
- * - Added 'RGB' and 'Area' columns to Table 1 (matching your screenshot).
- * - Included Group Headers in Table 1 for better overview.
+ * - Uses live `window.__pbnFacetResult` to calculate area.
+ * - This ensures manual facet recoloring is reflected in the Paint Mass calculations.
  */
 
 (() => {
@@ -53,7 +52,7 @@
         return { c:0, m:0, y:0, k:0, w:1 };
     }
 
-    // --- COLOR GROUPING (Pigment Pairs) ---
+    // --- COLOR GROUPING ---
     function rgbToHsl(r, g, b) {
         r /= 255; g /= 255; b /= 255;
         var max = Math.max(r, g, b), min = Math.min(r, g, b);
@@ -96,8 +95,75 @@
         if (scoreCM >= scoreCY && scoreCM >= scoreYM) {
             return { name: "Cyan + Magenta (Blues/Purples)", id: 20 };
         }
-        
         return { name: "Yellow + Magenta (Reds/Oranges)", id: 30 };
+    }
+
+    function parseColorStr(str) {
+        if(!str) return null;
+        if(str.startsWith('#')) {
+            const r = parseInt(str.substring(1,3), 16);
+            const g = parseInt(str.substring(3,5), 16);
+            const b = parseInt(str.substring(5,7), 16);
+            return [r,g,b];
+        }
+        const parts = str.match(/\d+/g);
+        if(parts && parts.length >= 3) {
+            return [parseInt(parts[0]), parseInt(parts[1]), parseInt(parts[2])];
+        }
+        return null;
+    }
+
+    // --- AREA CALCULATION STRATEGY ---
+    function getDataStrategies() {
+        // Strategy A: Use Live Data (Best for Manual Recolor)
+        if (window.__pbnFacetResult && window.__pbnFacetResult.facets) {
+            console.log("[PDF] Using Live Facet Data");
+            const counts = {};
+            let total = 0;
+            
+            window.__pbnFacetResult.facets.forEach(f => {
+                if (f) {
+                    // facet.color is the internal index
+                    counts[f.color] = (counts[f.color] || 0) + f.pointCount;
+                    total += f.pointCount;
+                }
+            });
+
+            return {
+                type: 'facetData',
+                totalPoints: total,
+                getRatio: (dataIndex, rgbKey) => {
+                    return (counts[dataIndex] || 0) / total;
+                }
+            };
+        }
+
+        // Strategy B: Fallback to Canvas Scanning (Old Method)
+        const canvas = document.getElementById('cReduction');
+        if (canvas) {
+            console.log("[PDF] Using Canvas Scan (Fallback)");
+            const ctx = canvas.getContext('2d');
+            const pixelData = ctx.getImageData(0,0, canvas.width, canvas.height).data;
+            const colorCounts = {}; 
+            let totalPixels = 0;
+            
+            for(let i=0; i<pixelData.length; i+=4) {
+                if(pixelData[i+3] < 128) continue;
+                const key = `${pixelData[i]},${pixelData[i+1]},${pixelData[i+2]}`;
+                colorCounts[key] = (colorCounts[key] || 0) + 1;
+                totalPixels++;
+            }
+            
+            return {
+                type: 'canvasScan',
+                totalPoints: totalPixels,
+                getRatio: (dataIndex, rgbKey) => {
+                    return (colorCounts[rgbKey] || 0) / totalPixels;
+                }
+            };
+        }
+
+        return null;
     }
 
     // --- MAIN PDF GENERATION ---
@@ -111,65 +177,56 @@
             const { jsPDF } = window.jspdf;
             const doc = new jsPDF();
 
-            // 1. Gather Data
+            // 1. Gather Context
             const targetSize = (window.__pbnGetTargetSizeMm && window.__pbnGetTargetSizeMm()) || { w: 800, h: 600 };
             const totalAreaCm2 = (targetSize.w / 10) * (targetSize.h / 10);
             
-            const canvas = document.getElementById('cReduction');
-            if(!canvas) { alert("Please process image first."); return; }
-            
-            const ctx = canvas.getContext('2d');
-            const pixelData = ctx.getImageData(0,0, canvas.width, canvas.height).data;
-            const colorCounts = {}; 
-            let totalPixels = 0;
-            
-            for(let i=0; i<pixelData.length; i+=4) {
-                if(pixelData[i+3] < 128) continue;
-                const key = `${pixelData[i]},${pixelData[i+1]},${pixelData[i+2]}`;
-                colorCounts[key] = (colorCounts[key] || 0) + 1;
-                totalPixels++;
-            }
+            const strategy = getDataStrategies();
+            if(!strategy) { alert("Please process image first."); return; }
 
             const paletteItems = Array.from(document.querySelectorAll('#palette .color'));
             const paletteData = [];
 
             paletteItems.forEach(item => {
-                const id = parseInt(item.innerText);
-                let bgStr = item.getAttribute('data-orig-bg') || item.style.backgroundColor;
-                let r=0,g=0,b=0;
+                // Determine IDs
+                // 'innerText' is the Display Label (could be reordered)
+                const displayId = parseInt(item.innerText);
                 
-                if(bgStr.startsWith('#')) {
-                    r = parseInt(bgStr.substring(1,3), 16);
-                    g = parseInt(bgStr.substring(3,5), 16);
-                    b = parseInt(bgStr.substring(5,7), 16);
-                } else {
-                    const parts = bgStr.match(/\d+/g);
-                    if(parts) { r=+parts[0]; g=+parts[1]; b=+parts[2]; }
-                }
+                // 'data-orig-id' is the Internal Data Index (matches facet.color)
+                // If it exists, use it. If not, fallback to displayId.
+                const rawIdx = item.getAttribute('data-orig-id');
+                const dataIndex = (rawIdx !== null && rawIdx !== undefined) ? parseInt(rawIdx) : displayId;
 
-                const key = `${r},${g},${b}`;
-                const count = colorCounts[key] || 0;
-                const ratio = count > 0 ? (count / totalPixels) : (1 / (paletteItems.length || 1));
+                // Determine Color (Visual)
+                const styleBg = item.style.backgroundColor;
+                const visualRgb = parseColorStr(styleBg) || [0,0,0];
+
+                // Determine Original Color (for Canvas Fallback only)
+                const origBg = item.getAttribute('data-orig-bg') || styleBg;
+                const lookupRgb = parseColorStr(origBg) || visualRgb;
+                const lookupKey = `${lookupRgb[0]},${lookupRgb[1]},${lookupRgb[2]}`;
+
+                // Calculate Area
+                const ratio = strategy.getRatio(dataIndex, lookupKey);
+                // Min 0.5g just to be safe so user doesn't run out
                 const grams = Math.max(0.5, (totalAreaCm2 * ratio) * CONFIG.ML_PER_CM2);
                 
+                // Grouping & Recipe
+                const r = visualRgb[0], g = visualRgb[1], b = visualRgb[2];
                 const group = getColorGroup([r,g,b]);
                 const hsl = rgbToHsl(r,g,b);
-
-                // Calculate absolute component weights for table
                 const ratios = calculateBaseRatios([r,g,b]);
-                const absC = ratios.c * grams;
-                const absM = ratios.m * grams;
-                const absY = ratios.y * grams;
-                const absK = ratios.k * grams;
-                const absW = ratios.w * grams;
 
                 paletteData.push({
-                    id: id,
+                    id: displayId, // Display ID for the PDF
                     rgb: [r,g,b],
                     grams: grams,
                     area: totalAreaCm2 * ratio,
                     ratios: ratios,
-                    components: { c: absC, m: absM, y: absY, k: absK, w: absW },
+                    components: { 
+                        c: ratios.c * grams, m: ratios.m * grams, y: ratios.y * grams, 
+                        k: ratios.k * grams, w: ratios.w * grams 
+                    },
                     group: group,
                     lightness: hsl.l
                 });
@@ -187,7 +244,6 @@
             doc.setFontSize(10);
             doc.text(`Target: ${targetSize.w}mm x ${targetSize.h}mm | Area: ${totalAreaCm2.toFixed(0)} cm²`, 14, 28);
             
-            // Prepare Table 1 Data
             let table1Body = [];
             let lastGroupId1 = -1;
 
@@ -231,10 +287,7 @@
                 },
                 didDrawCell: (data) => {
                     if (data.section === 'body' && data.column.index === 2) {
-                        // Locate original color (Need to account for header rows being in the data array but not in paletteData directly)
-                        // We map via ID in column 0
                         const id = data.row.raw[0];
-                        // If it's a header row, raw[0] is an object, not an ID
                         if (typeof id === 'number') {
                             const color = paletteData.find(x => x.id === id);
                             if(color) {
@@ -271,7 +324,7 @@
                 for(let i=0; i<items.length; i++) {
                     const item = items[i];
                     
-                    // --- MIXING STEP ---
+                    // Mixing Step
                     if (i === 0) {
                         const mixW = item.ratios.w * currentPotMass;
                         const mixC = item.ratios.c * currentPotMass;
@@ -294,11 +347,9 @@
                         currentPotRatios = item.ratios;
                     } else {
                         let deltaStr = [];
-                        
                         const calcDelta = (key, name) => {
                             const target = item.ratios[key];
                             const current = currentPotRatios[key];
-                            
                             if (target > current + 0.001) {
                                 const safeTarget = Math.min(target, 0.95); 
                                 let amountToAdd = currentPotMass * (target - current) / (1 - safeTarget);
@@ -326,7 +377,7 @@
                         currentPotRatios = item.ratios;
                     }
                     
-                    // --- USAGE STEP ---
+                    // Usage Step
                     tableRows.push([
                         `Use ID ${item.id}`, 
                         { content: "", styles: {fillColor: item.rgb}}, 

@@ -8,7 +8,7 @@
   'use strict';
 
   const STATE = {
-    active: false,
+    active: true,
     facetResult: null,
     colorsByIndex: null, // The real RGB values
     selectedFacetId: null
@@ -50,6 +50,15 @@
     const ref = $('pbnProtectionItem');
     if(ref) ref.parentNode.insertBefore(li, ref.nextSibling);
     else parent.appendChild(li);
+
+    // Ensure checkbox reflects STATE.active
+    const chk = $('chkManualRecolor');
+    if (chk) {
+      chk.checked = STATE.active;
+      // Trigger change so updateCursor() runs
+      chk.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
 
     // Event
     $('chkManualRecolor').addEventListener('change', (e) => {
@@ -104,9 +113,13 @@
           
           GUI.GUIProcessManager.createSVG = async function(facetResult, colorsByIndex, sizeMultiplier, fill, stroke, addColorLabels, fontSize, fontColor, onUpdate) {
               
-              // STORE DATA
+              // STORE DATA LOCALLY
               STATE.facetResult = facetResult;
               STATE.colorsByIndex = colorsByIndex;
+
+              // EXPOSE DATA GLOBALLY (Fix for PDF Export)
+              window.__pbnFacetResult = facetResult;
+              window.__pbnColorsByIndex = colorsByIndex;
               
               // Run original
               return await originalCreateSVG.call(this, facetResult, colorsByIndex, sizeMultiplier, fill, stroke, addColorLabels, fontSize, fontColor, onUpdate);
@@ -125,17 +138,10 @@
           if(!STATE.active) return;
           
           const target = e.target;
-          // Check if it is a path (facet) or text (label)
-          // We look for the data-facetId attribute
+          // Check if it is a path (facet)
           let facetId = target.getAttribute('data-facetId');
           
-          // If clicking on a label, we often hit <g> or <text>
-          // Unfortunately labels have no DOM ID link in the original code.
-          
-          if (!facetId) {
-             // Click was on text or border
-             return; 
-          }
+          if (!facetId) return; 
           
           e.preventDefault();
           e.stopPropagation();
@@ -187,12 +193,25 @@
             box-shadow: 0 2px 5px rgba(0,0,0,0.2);
           `;
           
-          // Show the "new number" from the palette DOM (safest source)
+          // Show the "new number" from the palette DOM (safest source if reordered)
+          let label = idx; 
           const paletteDom = document.querySelectorAll('#palette .color');
-          let label = idx; // Fallback: index 0..N
-          if(paletteDom && paletteDom[idx]) {
-              label = paletteDom[idx].innerText; // The number the user sees (1..N)
+          
+          // Find the palette DOM element that corresponds to this internal index (idx)
+          // If Runtime Recolor is active, DOM elements are reordered.
+          // We look for the element with data-orig-id == idx
+          let paletteEl = null;
+          if(paletteDom && paletteDom.length > 0) {
+              // Try finding by attribute first (Runtime Recolor adds this)
+              paletteEl = Array.from(paletteDom).find(el => el.getAttribute('data-orig-id') == idx);
+              // Fallback to index position if not reordered
+              if(!paletteEl && paletteDom[idx] && !paletteDom[idx].hasAttribute('data-orig-id')) {
+                  paletteEl = paletteDom[idx];
+              }
           }
+          
+          if(paletteEl) label = paletteEl.innerText;
+
           div.innerText = label;
           
           div.onclick = () => applyColorChange(facetId, idx);
@@ -223,7 +242,6 @@
       });
   }
 
-  // Helper
   function getContrastYIQ(rgbStr){
     const parts = rgbStr.match(/\d+/g);
     if(!parts) return 'black';
@@ -239,7 +257,6 @@
       setTimeout(injectUI, 1000);
       setTimeout(patchProcessManager, 2000);
       
-      // SVG listeners must be reattached when the SVG is rebuilt
       const container = $('svgContainer');
       if(container) {
           const obs = new MutationObserver(() => {

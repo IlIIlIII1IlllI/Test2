@@ -3,20 +3,14 @@ PROJECT STRUCTURE:
 ./
     .gitignore
     index.html
-    laser-export.js
     LICENSE
     package-lock.json
     package.json
     PBN_Istzustand_vs_Original.md
     README.md
-    report.20260112.225834.29868.0.001.json
     report.20260112.225841.45404.0.001.json
     report.20260112.225848.19388.0.001.json
     report.20260117.142506.10308.0.001.json
-    runtime-manual-recolor.js
-    runtime-protection.js
-    runtime-recolor.js
-    runtime-target-size.js
     Start-PaintByNumbers.bat
     Start-PaintByNumbers.ps1
     .github/
@@ -29,6 +23,13 @@ PROJECT STRUCTURE:
             materialize.min.js
             require.js
             saveSvgAsPng.js
+        upgrades/
+            laser-export.js
+            pdf-export.js
+            runtime-manual-recolor.js
+            runtime-protection.js
+            runtime-recolor.js
+            runtime-target-size.js
     src/
         colorreductionmanagement.ts
         common.ts
@@ -77,7 +78,7 @@ FILE CONTENTS:
 
 --- START FILE: .\.gitignore ---
 node_modules
-*.js
+.js
 *.map
 --- END FILE: .\.gitignore ---
 
@@ -432,9 +433,9 @@ node_modules
                         <div class="input-field">
                             <input placeholder="SVG Size multiplier" id="txtSizeMultiplier" type="number" value="3"
                                 min="1" class="validate">
-                            <label for="txtSizeMultiplier">SVG size multiplier
+                            <label for="txtSizeMultiplier">Preview Scaler (Resolution)
                                 <i class="material-icons tooltipped"
-                                    data-tooltip="Increases the SVG size compared to the original image, useful when the labels don't fit inside the tiny segments">info</i>
+                                    data-tooltip="Multiplies internal coordinate resolution (1=Pixel perfect, 3=High Def). Higher values = smoother curves but thinner looking lines in preview.">info</i>
                             </label>
                         </div>
                     </div>
@@ -504,823 +505,35 @@ node_modules
 
         });
     </script>
-<script src="laser-export.js"></script>
-<script src="runtime-target-size.js"></script>
-<script src="runtime-recolor.js"></script>
-<script src="runtime-protection.js"></script>
-<script src="runtime-manual-recolor.js"></script>
+<script src="scripts/upgrades/laser-export.js"></script>
+<script src="scripts/upgrades/runtime-target-size.js"></script>
+<script src="scripts/upgrades/runtime-recolor.js"></script>
+<script src="scripts/upgrades/runtime-protection.js"></script>
+<script src="scripts/upgrades/runtime-manual-recolor.js"></script>
+<!-- PDF LIBS: Hide RequireJS temporarily so jsPDF attaches to window -->
+<script>
+    if (window.define) {
+        window._tempDefine = window.define;
+        window.define = null;
+    }
+</script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
+
+<script>
+    if (window._tempDefine) {
+        window.define = window._tempDefine;
+        window._tempDefine = null;
+    }
+</script>
+
+<script src="scripts/upgrades/pdf-export.js"></script>
 </body>
 
 </html>
 
 --- END FILE: .\index.html ---
-
-
---- START FILE: .\laser-export.js ---
-/*
- * PaintByNumbersGenerator – Laser export runtime patch (v9.4 - Travel Optimizer)
- *
- * FIXES & FEATURES:
- * - True Deduplication: Every border edge is hashed. Duplicates are deleted.
- * - Path Stitching: Connects touching edges into long continuous paths (fewer Laser ON/OFFs).
- * - Travel Optimization: Sorts paths using "Nearest Neighbor" to minimize rapid moves.
- * - Stable Loading: Output is chunked to prevent LaserGRBL XML parsing errors.
- */
-
-(function () {
-  "use strict";
-
-  var DEFAULT_STROKE_WIDTH = 0.35;
-  var FORCE_STROKE_COLOR = "#000";
-  var BATCH_SIZE = 50; // Smaller chunks for safety with complex stitched paths
-
-  // V8 Simplex Digits
-  var DIGITS = {
-    "0": { w: 7, s: [[[2,9], [1,8], [1,2], [2,1], [5,1], [6,2], [6,8], [5,9], [2,9]]] },
-    "1": { w: 5, s: [[[2,2], [3.5,1], [3.5,9]], [[2,9], [5,9]]] },
-    "2": { w: 7, s: [[[1,3], [2,1], [5,1], [6,2], [6,4], [1,9], [7,9]]] },
-    "3": { w: 7, s: [[[1,2], [2,1], [5,1], [6,2], [6,4], [4,5], [6,6], [6,8], [5,9], [2,9], [1,8]]] },
-    "4": { w: 7, s: [[[5,9], [5,1], [1,6], [7,6]]] }, 
-    "5": { w: 7, s: [[[6,1], [1.5,1], [1.5,4], [2,3.5], [5,3.5], [6,4.5], [6,8], [5,9], [2,9], [1,8]]] },
-    "6": { w: 7, s: [[[5,1], [2,1], [1,2], [1,8], [2,9], [5,9], [6,8], [6,6], [5,5], [1.5,5]]] },
-    "7": { w: 7, s: [[[1,1], [6,1], [3,9]]] },
-    "8": { w: 7, s: [[[2,1], [5,1], [6,2], [6,4], [5,5], [2,5], [1,6], [1,8], [2,9], [5,9], [6,8], [6,6], [5,5], [2,4], [1,2], [2,1]]] },
-    "9": { w: 7, s: [[[5.5,5], [2,5], [1,4], [1,2], [2,1], [5,1], [6,2], [6,8], [5,9], [2,9]]] },
-    " ": { w: 4, s: [] }
-  };
-
-  // --- Helpers ---
-  function downloadTextFile(filename, text) {
-    var preface = '<?xml version="1.0" standalone="no"?>\r\n';
-    var blob = new Blob([preface, text], { type: "image/svg+xml;charset=utf-8" });
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement("a");
-    a.style.display = 'none';
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(function () { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
-  }
-
-  function getCurrentSvgMarkup() {
-    var svg = document.querySelector("#svgContainer svg");
-    if (!svg) return null;
-    if (window.__pbnGetTargetSizeMm) {
-        const size = window.__pbnGetTargetSizeMm();
-        if(size && size.w && size.h) {
-            svg.setAttribute('width', size.w + 'mm');
-            svg.setAttribute('height', size.h + 'mm');
-        }
-    }
-    if(!svg.getAttribute("xmlns")) svg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
-    return svg.outerHTML;
-  }
-
-  function parseNumberAttr(el, name, fallback) {
-    var v = el.getAttribute(name);
-    if (v == null) return fallback;
-    var n = parseFloat(v);
-    return isFinite(n) ? n : fallback;
-  }
-
-  function getStrokeWidthFromUI() {
-    var el = document.getElementById('txtSingleLineStrokeWidth');
-    return el ? (parseFloat(el.value) || DEFAULT_STROKE_WIDTH) : DEFAULT_STROKE_WIDTH;
-  }
-
-  function strokeTextToPath(text, letterSpacing) {
-    var height = 10;
-    var x = 0;
-    var parts = [];
-    for (var i = 0; i < text.length; i++) {
-      var ch = text.charAt(i);
-      var g = DIGITS[ch];
-      if (!g) continue;
-      for (var si = 0; si < g.s.length; si++) {
-        var stroke = g.s[si];
-        if (!stroke || stroke.length < 2) continue;
-        parts.push(["M", x + stroke[0][0], stroke[0][1]]);
-        for (var pi = 1; pi < stroke.length; pi++) {
-          parts.push(["L", x + stroke[pi][0], stroke[pi][1]]);
-        }
-      }
-      x += g.w + letterSpacing;
-    }
-    var width = Math.max(0, x - letterSpacing);
-    return { segs: parts, width: width, height: height };
-  }
-
-  // --- Math ---
-  function matMul(a, b) {
-    return [
-      a[0]*b[0] + a[2]*b[1], a[1]*b[0] + a[3]*b[1],
-      a[0]*b[2] + a[2]*b[3], a[1]*b[2] + a[3]*b[3],
-      a[0]*b[4] + a[2]*b[5] + a[4], a[1]*b[4] + a[3]*b[5] + a[5]
-    ];
-  }
-  
-  function matApply(m, x, y) {
-    if (!m) return [x, y];
-    return [m[0]*x + m[2]*y + m[4], m[1]*x + m[3]*y + m[5]];
-  }
-
-  function matTranslate(tx, ty) { return [1,0,0,1,tx,ty]; }
-  function matScale(sx, sy) { return [sx,0,0,sy,0,0]; }
-
-  function parseTransformList(t) {
-    var m = [1,0,0,1,0,0];
-    if (!t) return m;
-    var re = /(translate|scale)\s*\(([^)]*)\)/ig;
-    var match;
-    while ((match = re.exec(t)) !== null) {
-      var fn = match[1].toLowerCase();
-      var args = match[2].trim().split(/[\s,]+/).filter(Boolean).map(parseFloat);
-      if (fn === "translate") {
-        m = matMul(m, matTranslate(args[0]||0, args[1]||0));
-      } else if (fn === "scale") {
-        m = matMul(m, matScale(args[0]||1, args[1]||args[0]||1));
-      }
-    }
-    return m;
-  }
-
-  function cumulativeTransformMatrix(el, stopAt) {
-    var mats = [];
-    var cur = el;
-    while (cur && cur !== stopAt && cur) {
-      if (cur.getAttribute) {
-        var t = cur.getAttribute('transform');
-        if (t) mats.push(parseTransformList(t));
-      }
-      cur = cur.parentNode;
-    }
-    var M = [1,0,0,1,0,0];
-    for (var i = mats.length - 1; i >= 0; i--) {
-      M = matMul(M, mats[i]);
-    }
-    return M;
-  }
-
-  // --- Optimization Engine v9.4 ---
-
-  function flattenNestedSvg(doc) {
-    var root = doc.documentElement;
-    var allSvgs = Array.prototype.slice.call(root.getElementsByTagName("svg"));
-    if (allSvgs.length <= 1) return;
-
-    for (var i = allSvgs.length - 1; i >= 1; i--) {
-      var svg = allSvgs[i];
-      if (!svg || !svg.parentNode) continue;
-      if (svg === root) continue;
-
-      var x = parseNumberAttr(svg, "x", 0);
-      var y = parseNumberAttr(svg, "y", 0);
-      var w = parseNumberAttr(svg, "width", 0);
-      var h = parseNumberAttr(svg, "height", 0);
-      var vbAttr = svg.getAttribute("viewBox");
-      var vb = vbAttr ? vbAttr.trim().split(/[\s,]+/).map(parseFloat) : [];
-      
-      var vbMinX = (vb.length === 4) ? vb[0] : 0;
-      var vbMinY = (vb.length === 4) ? vb[1] : 0;
-      var vbW = (vb.length === 4) ? vb[2] : (w || 0);
-      var vbH = (vb.length === 4) ? vb[3] : (h || 0);
-      if (!w) w = vbW;
-      if (!h) h = vbH;
-
-      var scaleX = (vbW) ? (w / vbW) : 1;
-      var scaleY = (vbH) ? (h / vbH) : 1;
-      var s = Math.min(scaleX, scaleY); 
-      var dx = (w - vbW * s) / 2;
-      var dy = (h - vbH * s) / 2;
-
-      var existing = (svg.getAttribute("transform") || "").trim();
-      var tMap = "translate(" + x + "," + y + ") translate(" + dx + "," + dy + ") scale(" + s + ") translate(" + (-vbMinX) + "," + (-vbMinY) + ")";
-      if (existing) tMap = existing + " " + tMap;
-
-      var g = doc.createElementNS("http://www.w3.org/2000/svg", "g");
-      g.setAttribute("transform", tMap);
-
-      while (svg.firstChild) g.appendChild(svg.firstChild);
-      svg.parentNode.replaceChild(g, svg);
-    }
-  }
-
-  function convertTextNodesToLabelPaths(doc, strokeWidth) {
-    var svgEl = doc.documentElement;
-    var texts = Array.prototype.slice.call(svgEl.getElementsByTagName("text"));
-    for (var ti = 0; ti < texts.length; ti++) {
-      var t = texts[ti];
-      var label = (t.textContent || "").trim();
-      if (!label || !/^\d+$/.test(label)) continue;
-
-      var x = parseNumberAttr(t, "x", 0);
-      var y = parseNumberAttr(t, "y", 0);
-      var fontSize = parseNumberAttr(t, "font-size", 12);
-      
-      var letterSpacing = (label.length > 1) ? 1.0 : 1.5; 
-      var p = strokeTextToPath(label, letterSpacing);
-      var scale = fontSize / p.height;
-
-      var scaledW = p.width * scale;
-      var xOffset = (-scaledW/2); 
-      var yOffset = (-p.height * scale * 0.5);
-
-      var dparts = [];
-      for (var si = 0; si < p.segs.length; si++) {
-        var seg = p.segs[si];
-        var cmd = seg[0];
-        var px = (seg[1] * scale) + x + xOffset;
-        var py = (seg[2] * scale) + y + yOffset;
-        dparts.push(cmd + " " + px.toFixed(3) + " " + py.toFixed(3));
-      }
-
-      var path = doc.createElementNS("http://www.w3.org/2000/svg", "path");
-      path.setAttribute("d", dparts.join(" "));
-      path.setAttribute("fill", "none");
-      path.setAttribute("stroke", FORCE_STROKE_COLOR);
-      path.setAttribute("stroke-width", String(strokeWidth));
-      path.setAttribute("data-label", "true"); 
-      
-      t.parentNode.replaceChild(path, t);
-    }
-  }
-
-  function bakePathData(d, matrix) {
-      if (!d) return null;
-      var tokens = d.replace(/,/g, ' ').trim().split(/\s+/);
-      var idx = 0;
-      var out = [];
-      // Calculate BBox for sorting
-      var cx=0, cy=0; // needed for implicit relative moves if any
-      var points = [];
-
-      function applyM(x, y) { return matApply(matrix, x, y); }
-
-      while (idx < tokens.length) {
-          var cmd = tokens[idx++];
-          if (cmd.toUpperCase() === 'M' || cmd.toUpperCase() === 'L') {
-              var nx = parseFloat(tokens[idx++]);
-              var ny = parseFloat(tokens[idx++]);
-              var pt = applyM(nx, ny);
-              out.push(cmd.toUpperCase() + ' ' + pt[0].toFixed(3) + ' ' + pt[1].toFixed(3));
-              points.push(pt);
-          } else if (cmd.toUpperCase() === 'Q') {
-              var c1x = parseFloat(tokens[idx++]);
-              var c1y = parseFloat(tokens[idx++]);
-              var nx = parseFloat(tokens[idx++]);
-              var ny = parseFloat(tokens[idx++]);
-              var cp = applyM(c1x, c1y);
-              var pt = applyM(nx, ny);
-              out.push('Q ' + cp[0].toFixed(3) + ' ' + cp[1].toFixed(3) + ' ' + pt[0].toFixed(3) + ' ' + pt[1].toFixed(3));
-              points.push(pt);
-          } else if (cmd.toUpperCase() === 'Z') {
-              out.push('Z');
-          }
-      }
-      
-      // Calculate Centroid of this label for TSP sorting
-      var midX = 0, midY = 0;
-      if (points.length > 0) {
-          points.forEach(p => { midX += p[0]; midY += p[1]; });
-          midX /= points.length;
-          midY /= points.length;
-      }
-
-      return { d: out.join(' '), center: {x: midX, y: midY} };
-  }
-
-  function getSegmentHash(p1, p2, cp) {
-     var x1 = p1[0].toFixed(2), y1 = p1[1].toFixed(2);
-     var x2 = p2[0].toFixed(2), y2 = p2[1].toFixed(2);
-     var s1 = x1 + ',' + y1;
-     var s2 = x2 + ',' + y2;
-     var sc = cp ? '|' + cp[0].toFixed(2) + ',' + cp[1].toFixed(2) : '';
-     // Canonical form: smaller coord string first
-     return (s1 < s2) ? (s1 + '-' + s2 + sc) : (s2 + '-' + s1 + sc);
-  }
-
-  function parseAndDecomposeBorders(d, matrix) {
-      var tokens = d.replace(/,/g, ' ').trim().split(/\s+/);
-      var idx = 0;
-      var cx = 0, cy = 0;
-      var sx = 0, sy = 0;
-      var edges = [];
-
-      function applyM(x, y) { return matApply(matrix, x, y); }
-
-      while (idx < tokens.length) {
-          var cmd = tokens[idx++];
-          if (cmd.toUpperCase() === 'M') {
-              var pt = applyM(parseFloat(tokens[idx++]), parseFloat(tokens[idx++]));
-              cx = pt[0]; cy = pt[1];
-              sx = cx; sy = cy;
-          } else if (cmd.toUpperCase() === 'L') {
-              var pt = applyM(parseFloat(tokens[idx++]), parseFloat(tokens[idx++]));
-              edges.push({ type:'L', p1:[cx,cy], p2:[pt[0],pt[1]] });
-              cx = pt[0]; cy = pt[1];
-          } else if (cmd.toUpperCase() === 'Q') {
-              var cp = applyM(parseFloat(tokens[idx++]), parseFloat(tokens[idx++]));
-              var pt = applyM(parseFloat(tokens[idx++]), parseFloat(tokens[idx++]));
-              edges.push({ type:'Q', p1:[cx,cy], p2:[pt[0],pt[1]], c:[cp[0],cp[1]] });
-              cx = pt[0]; cy = pt[1];
-          } else if (cmd.toUpperCase() === 'Z') {
-              if (Math.abs(cx-sx)>0.01 || Math.abs(cy-sy)>0.01) {
-                  edges.push({ type:'L', p1:[cx,cy], p2:[sx,sy] });
-              }
-              cx = sx; cy = sy;
-          }
-      }
-      return edges;
-  }
-
-  // --- Advanced Optimizers ---
-
-  /**
-   * Stitches loose segments into long continuous chains.
-   */
-  function stitchEdges(edges) {
-      // 1. Build Adjacency Map
-      // Key: "x.xx,y.yy" -> Array of Edges attached to this point
-      var adj = {};
-      
-      function k(pt) { return pt[0].toFixed(2) + ',' + pt[1].toFixed(2); }
-      
-      function addToAdj(key, edge) {
-          if (!adj[key]) adj[key] = [];
-          adj[key].push(edge);
-      }
-
-      edges.forEach(e => {
-          e.visited = false;
-          // Store original reference and direction implied by connection
-          addToAdj(k(e.p1), e);
-          addToAdj(k(e.p2), e);
-      });
-
-      var chains = [];
-
-      // 2. Iterate all edges to build chains
-      for (var i = 0; i < edges.length; i++) {
-          var startEdge = edges[i];
-          if (startEdge.visited) continue;
-
-          // Start a new chain
-          var chain = [];
-          var current = startEdge;
-          var headPoint = current.p1; 
-          var tailPoint = current.p2;
-          
-          current.visited = true;
-          // Ensure first segment orientation is P1->P2 in logical chain (we assume forward)
-          // Store segment and a flag if it needs flipping
-          chain.push({ edge: current, reverse: false });
-
-          // Grow Tail (Forward)
-          var growing = true;
-          while (growing) {
-              var candidates = adj[k(tailPoint)];
-              var foundNext = false;
-              if (candidates) {
-                  for (var c = 0; c < candidates.length; c++) {
-                      var cand = candidates[c];
-                      if (!cand.visited) {
-                          cand.visited = true;
-                          
-                          // Determine direction. 
-                          // Does cand start or end at tailPoint?
-                          var distToP1 = Math.abs(cand.p1[0] - tailPoint[0]) + Math.abs(cand.p1[1] - tailPoint[1]);
-                          var isNaturalDir = (distToP1 < 0.1); 
-                          
-                          chain.push({ edge: cand, reverse: !isNaturalDir });
-                          tailPoint = isNaturalDir ? cand.p2 : cand.p1;
-                          
-                          foundNext = true;
-                          break; 
-                      }
-                  }
-              }
-              if (!foundNext) growing = false;
-          }
-
-          // Grow Head (Backward)
-          // We look for segments connected to headPoint (original p1)
-          growing = true;
-          while (growing) {
-              var candidates = adj[k(headPoint)];
-              var foundPrev = false;
-              if (candidates) {
-                  for (var c = 0; c < candidates.length; c++) {
-                      var cand = candidates[c];
-                      if (!cand.visited) {
-                          cand.visited = true;
-                          
-                          // We are extending BACKWARDS from headPoint.
-                          // So if cand ends at headPoint (cand.p2 == headPoint), it is natural direction A->B->Head.
-                          // If cand starts at headPoint, it is reverse direction Head->B->A (conceptually).
-                          
-                          var distToP2 = Math.abs(cand.p2[0] - headPoint[0]) + Math.abs(cand.p2[1] - headPoint[1]);
-                          var isNaturalDir = (distToP2 < 0.1);
-
-                          // Prepend
-                          chain.unshift({ edge: cand, reverse: !isNaturalDir });
-                          
-                          // Update new Head
-                          headPoint = isNaturalDir ? cand.p1 : cand.p2;
-                          
-                          foundPrev = true;
-                          break;
-                      }
-                  }
-              }
-              if (!foundPrev) growing = false;
-          }
-
-          chains.push({
-             segments: chain,
-             startPt: headPoint,
-             endPt: tailPoint
-          });
-      }
-      return chains;
-  }
-
-  /**
-   * Sorts chains (polylines) using Greedy Nearest Neighbor (Travel Optimization)
-   */
-  function sortChains(chains) {
-      if (chains.length === 0) return [];
-      
-      var sorted = [];
-      var currentPos = [0, 0]; // Laser starts at origin
-      var unvisited = new Set(chains);
-      
-      // Safety brake for huge files
-      var count = 0;
-      var limit = chains.length + 1;
-
-      while (unvisited.size > 0 && count < limit) {
-          count++;
-          
-          var nearest = null;
-          var minDist = Infinity;
-          var reversed = false;
-          
-          // Find closest start or end of any remaining chain
-          // (Since we are in browser JS, naive O(N) scan per step is slow for 50k items.
-          // BUT: 50k edges usually reduce to < 2k chains. O(N^2) for N=2000 is 4M ops, which is fine (~50ms).)
-          
-          for (var chain of unvisited) {
-              // Dist to Start
-              var dStart = Math.abs(chain.startPt[0] - currentPos[0]) + Math.abs(chain.startPt[1] - currentPos[1]);
-              
-              if (dStart < minDist) {
-                  minDist = dStart;
-                  nearest = chain;
-                  reversed = false; // We play it start->end
-              }
-              
-              // Optimization: Also check end point? If we play it reversed?
-              // Yes, LaserGRBL supports this better if paths are contiguous.
-              var dEnd = Math.abs(chain.endPt[0] - currentPos[0]) + Math.abs(chain.endPt[1] - currentPos[1]);
-              if (dEnd < minDist) {
-                  minDist = dEnd;
-                  nearest = chain;
-                  reversed = true; // We play it end->start
-              }
-          }
-          
-          if (nearest) {
-              unvisited.delete(nearest);
-              // Store reversal decision in the chain object for the renderer
-              nearest.renderReverse = reversed; 
-              
-              sorted.push(nearest);
-              currentPos = reversed ? nearest.startPt : nearest.endPt;
-          } else {
-              break; 
-          }
-      }
-      return sorted;
-  }
-  
-  function sortLabels(labels) {
-      // Same logic for labels (Point-based TSP)
-      if (labels.length === 0) return [];
-      
-      var sorted = [];
-      var currentPos = [0, 0];
-      var unvisited = new Set(labels);
-      
-      var count = 0;
-      while (unvisited.size > 0 && count++ < labels.length + 1) {
-          var nearest = null;
-          var minDist = Infinity;
-          
-          for (var l of unvisited) {
-              var d = Math.abs(l.center.x - currentPos[0]) + Math.abs(l.center.y - currentPos[1]);
-              if (d < minDist) {
-                  minDist = d;
-                  nearest = l;
-              }
-          }
-          
-          if(nearest) {
-              unvisited.delete(nearest);
-              sorted.push(nearest);
-              currentPos = [nearest.center.x, nearest.center.y];
-          } else break;
-      }
-      return sorted;
-  }
-
-  function optimizeGeometry(svgString) {
-      console.log("Parsing SVG...");
-      var parser = new DOMParser();
-      var doc = parser.parseFromString(svgString, 'image/svg+xml');
-      
-      flattenNestedSvg(doc);
-      convertTextNodesToLabelPaths(doc, getStrokeWidthFromUI());
-      
-      var labels = [];
-      var borderEdges = [];
-      var uniqueEdgeHashes = new Set();
-      var dedupCount = 0;
-
-      var elements = Array.from(doc.querySelectorAll('path, rect, circle, polygon, polyline'));
-
-      elements.forEach(function(el) {
-          var isLabel = el.getAttribute('data-label') === 'true';
-          
-          var hasFill = (el.getAttribute('fill') && el.getAttribute('fill') !== 'none');
-          var hasStroke = (el.getAttribute('stroke') && el.getAttribute('stroke') !== 'none');
-          
-          var M = cumulativeTransformMatrix(el, doc.documentElement);
-          var d = el.getAttribute('d');
-          
-          if (el.tagName === 'rect' && !d) {
-             var x=parseFloat(el.getAttribute('x')||0), y=parseFloat(el.getAttribute('y')||0), w=parseFloat(el.getAttribute('width')||0), h=parseFloat(el.getAttribute('height')||0);
-             d = `M ${x} ${y} L ${x+w} ${y} L ${x+w} ${y+h} L ${x} ${y+h} Z`;
-          }
-
-          if (!d) return;
-
-          if (isLabel) {
-             var baked = bakePathData(d, M);
-             if (baked) labels.push(baked);
-          } 
-          else if (hasFill || hasStroke) {
-             var segs = parseAndDecomposeBorders(d, M);
-             segs.forEach(function(s) {
-                 var h = getSegmentHash(s.p1, s.p2, s.c);
-                 if (!uniqueEdgeHashes.has(h)) {
-                     uniqueEdgeHashes.add(h);
-                     borderEdges.push(s);
-                 } else {
-                     dedupCount++;
-                 }
-             });
-          }
-      });
-      
-      console.log("Edges: " + borderEdges.length + " (Removed duplicates: " + dedupCount + ")");
-      
-      // Stitch
-      console.log("Stitching chains...");
-      var rawChains = stitchEdges(borderEdges);
-      console.log("Created " + rawChains.length + " continuous paths.");
-      
-      // Sort Borders
-      console.log("Optimizing Border Travel (TSP)...");
-      var sortedChains = sortChains(rawChains);
-      
-      // Sort Labels
-      console.log("Optimizing Label Travel (TSP)...");
-      var sortedLabels = sortLabels(labels);
-
-      // Reconstruct
-      console.log("Generating Output...");
-      var newSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-      var root = doc.documentElement;
-      
-      var rootW = root.getAttribute("width") || "100%";
-      var rootH = root.getAttribute("height") || "100%";
-      var rootVB = root.getAttribute("viewBox");
-      
-      if(!rootVB || rootVB === 'null') {
-          var vW = parseFloat(rootW) || 1000;
-          var vH = parseFloat(rootH) || 1000;
-          rootVB = `0 0 ${vW} ${vH}`;
-      }
-
-      newSvg.setAttribute("width", rootW);
-      newSvg.setAttribute("height", rootH);
-      newSvg.setAttribute("viewBox", rootVB);
-      newSvg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
-
-      var gBorders = document.createElementNS("http://www.w3.org/2000/svg", "g");
-      gBorders.setAttribute("id", "laser-borders");
-      gBorders.setAttribute("stroke", FORCE_STROKE_COLOR);
-      gBorders.setAttribute("fill", "none");
-      gBorders.setAttribute("stroke-width", "0.2");
-      
-      // Convert sorted chains to path data
-      // Use Chunking for Safety
-      var currentD = "";
-      var counter = 0;
-      var flushLimit = BATCH_SIZE;
-      
-      function flush(group, dVal) {
-          if (!dVal) return;
-          var p = document.createElementNS("http://www.w3.org/2000/svg", "path");
-          p.setAttribute("d", dVal);
-          group.appendChild(p);
-      }
-      
-      sortedChains.forEach(chain => {
-          // chain.segments is array of {edge, reverse}
-          // if chain.renderReverse is true, we iterate backwards and flip reverse flags
-          
-          var segsToRender = chain.segments;
-          if (chain.renderReverse) {
-              segsToRender = [];
-              for(var i = chain.segments.length-1; i>=0; i--) {
-                  var item = chain.segments[i];
-                  segsToRender.push({ edge: item.edge, reverse: !item.reverse });
-              }
-          }
-          
-          // Render this continuous line
-          // Determine Start point of first segment
-          var start = segsToRender[0].reverse ? segsToRender[0].edge.p2 : segsToRender[0].edge.p1;
-          
-          currentD += `M ${start[0].toFixed(3)} ${start[1].toFixed(3)} `;
-          
-          segsToRender.forEach(item => {
-              var s = item.edge;
-              var target = item.reverse ? s.p1 : s.p2; // if reversed, target is p1
-              
-              if(s.type === 'L') {
-                   currentD += `L ${target[0].toFixed(3)} ${target[1].toFixed(3)} `;
-              } else {
-                   // Quad control point is absolute, doesn't change
-                   currentD += `Q ${s.c[0].toFixed(3)} ${s.c[1].toFixed(3)} ${target[0].toFixed(3)} ${target[1].toFixed(3)} `;
-              }
-          });
-          
-          if (++counter >= flushLimit) {
-              flush(gBorders, currentD);
-              currentD = "";
-              counter = 0;
-          }
-      });
-      flush(gBorders, currentD);
-      newSvg.appendChild(gBorders);
-
-      var gLabels = document.createElementNS("http://www.w3.org/2000/svg", "g");
-      gLabels.setAttribute("id", "laser-labels");
-      gLabels.setAttribute("stroke", FORCE_STROKE_COLOR);
-      gLabels.setAttribute("fill", "none");
-      gLabels.setAttribute("stroke-width", String(getStrokeWidthFromUI()));
-      
-      currentD = "";
-      counter = 0;
-      
-      sortedLabels.forEach(lp => {
-          currentD += lp.d + " ";
-          if (++counter >= flushLimit) {
-              flush(gLabels, currentD);
-              currentD = "";
-              counter = 0;
-          }
-      });
-      flush(gLabels, currentD);
-      newSvg.appendChild(gLabels);
-      
-      console.log("Done.");
-      return new XMLSerializer().serializeToString(newSvg);
-  }
-
-
-  // --- UI Injection ---
-  function ensureButtons() {
-    var oldBtn = document.getElementById('btnDownloadSVG');
-    if (!oldBtn) return;
-    if (oldBtn.getAttribute('data-pbn-patched') === 'true') return;
-
-    var newPreviewBtn = oldBtn.cloneNode(true);
-    oldBtn.parentNode.replaceChild(newPreviewBtn, oldBtn);
-    
-    newPreviewBtn.id = 'btnDownloadSVG'; 
-    newPreviewBtn.textContent = 'Download SVG (Preview)';
-    newPreviewBtn.setAttribute('data-pbn-patched', 'true');
-
-    newPreviewBtn.addEventListener('click', function(ev) {
-        ev.preventDefault();
-        try {
-            var svg = getCurrentSvgMarkup();
-            if (svg) downloadTextFile('preview.svg', svg);
-        } catch(e) { console.error(e); }
-    });
-
-    var laserBtnId = 'btnDownloadSVGLaser';
-    var oldLaserBtn = document.getElementById(laserBtnId);
-    if (oldLaserBtn) oldLaserBtn.parentNode.removeChild(oldLaserBtn); 
-
-    var laserBtn = document.createElement('a');
-    laserBtn.id = laserBtnId;
-    laserBtn.className = newPreviewBtn.className;
-    laserBtn.style.marginLeft = '8px';
-    laserBtn.textContent = 'Download Laser SVG (Optimized)';
-    
-    newPreviewBtn.parentNode.insertBefore(laserBtn, newPreviewBtn.nextSibling);
-
-    laserBtn.addEventListener('click', function (ev) {
-      ev.preventDefault();
-      try {
-        var svg = getCurrentSvgMarkup();
-        if (!svg) { alert("No image available."); return; }
-        
-        // Timeout to let UI breathe
-        laserBtn.textContent = "Optimizing...";
-        setTimeout(function() {
-            var laserSvg = optimizeGeometry(svg);
-            downloadTextFile('laser_optimized.svg', laserSvg);
-            laserBtn.textContent = 'Download Laser SVG (Optimized)';
-        }, 50);
-        
-      } catch(e) {
-          console.error(e);
-          alert("Error: " + e.message);
-      }
-    });
-  }
-
-  function ensureStrokeWidthInput() {
-    if (document.getElementById('txtSingleLineStrokeWidth')) return;
-    var anchor = document.getElementById('btnDownloadSVGLaser');
-    if (!anchor) return;
-
-    var wrapper = document.createElement('span');
-    wrapper.style.marginLeft = '12px';
-    wrapper.style.display = 'inline-flex';
-    wrapper.style.alignItems = 'center';
-    wrapper.style.gap = '6px';
-    wrapper.innerHTML = `<span style="font-size:12px;">Label Stroke:</span>`;
-    
-    var input = document.createElement('input');
-    input.id = 'txtSingleLineStrokeWidth';
-    input.type = 'number';
-    input.min = '0.1';
-    input.step = '0.05';
-    input.value = String(DEFAULT_STROKE_WIDTH);
-    input.style.width = '60px';
-    input.style.height = '30px';
-    input.style.margin = '0';
-    wrapper.appendChild(input);
-    anchor.parentNode.insertBefore(wrapper, anchor.nextSibling);
-  }
-
-  // --- INIT ---
-  var _initDone = false;
-  function init() {
-     if(_initDone) return;
-     setTimeout(function(){
-         ensureButtons();
-         ensureStrokeWidthInput();
-         _initDone = true;
-     }, 1000);
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
-    init();
-  }
-  
-  var obs = new MutationObserver(function(mutations) {
-      var needsRebind = false;
-      for(var i=0; i<mutations.length; i++) {
-          if(mutations[i].target.id === 'output-pane' || mutations[i].target.id === 'options-pane') {
-              needsRebind = true;
-              break;
-          }
-      }
-      if(needsRebind) {
-          setTimeout(function() {
-             ensureButtons();
-             ensureStrokeWidthInput();
-          }, 200);
-      }
-  });
-  
-  setTimeout(function() {
-      var target = document.getElementById('options-pane') || document.body;
-      obs.observe(target, { childList: true, subtree: true });
-  }, 1500);
-
-})();
---- END FILE: .\laser-export.js ---
 
 
 --- START FILE: .\LICENSE ---
@@ -4230,603 +3443,6 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
 --- END FILE: .\README.md ---
 
 
---- START FILE: .\report.20260112.225834.29868.0.001.json ---
-
-{
-  "header": {
-    "reportVersion": 1,
-    "event": "Allocation failed - JavaScript heap out of memory",
-    "trigger": "FatalError",
-    "filename": "report.20260112.225834.29868.0.001.json",
-    "dumpEventTime": "2026-01-12T22:58:34Z",
-    "dumpEventTimeStamp": "1768255114974",
-    "processId": 29868,
-    "cwd": "C:\\Users\\joshu\\Downloads\\paintbynumbersgenerator-master\\paintbynumbersgenerator-master",
-    "commandLine": [
-      "node",
-      "C:\\Users\\joshu\\Downloads\\paintbynumbersgenerator-master\\paintbynumbersgenerator-master\\node_modules\\.bin\\\\..\\lite-server\\bin\\lite-server",
-      "--port",
-      "10001"
-    ],
-    "nodejsVersion": "v12.7.0",
-    "wordSize": 64,
-    "arch": "x64",
-    "platform": "win32",
-    "componentVersions": {
-      "node": "12.7.0",
-      "v8": "7.5.288.22-node.16",
-      "uv": "1.30.1",
-      "zlib": "1.2.11",
-      "brotli": "1.0.7",
-      "ares": "1.15.0",
-      "modules": "72",
-      "nghttp2": "1.39.1",
-      "napi": "4",
-      "llhttp": "1.1.4",
-      "http_parser": "2.8.0",
-      "openssl": "1.1.1c",
-      "cldr": "35.1",
-      "icu": "64.2",
-      "tz": "2019a",
-      "unicode": "12.1"
-    },
-    "release": {
-      "name": "node",
-      "headersUrl": "https://nodejs.org/download/release/v12.7.0/node-v12.7.0-headers.tar.gz",
-      "sourceUrl": "https://nodejs.org/download/release/v12.7.0/node-v12.7.0.tar.gz",
-      "libUrl": "https://nodejs.org/download/release/v12.7.0/win-x64/node.lib"
-    },
-    "osName": "Windows_NT",
-    "osRelease": "10.0.26200",
-    "osVersion": "Windows 10 Pro",
-    "osMachine": "x86_64",
-    "cpus": [
-      {
-        "model": "AMD Ryzen 7 7800X3D 8-Core Processor           ",
-        "speed": 4192,
-        "user": 14090093,
-        "nice": 0,
-        "sys": 23559062,
-        "idle": 289454281,
-        "irq": 2935343
-      },
-      {
-        "model": "AMD Ryzen 7 7800X3D 8-Core Processor           ",
-        "speed": 4192,
-        "user": 14090093,
-        "nice": 0,
-        "sys": 23559062,
-        "idle": 289454281,
-        "irq": 2935343
-      },
-      {
-        "model": "AMD Ryzen 7 7800X3D 8-Core Processor           ",
-        "speed": 4192,
-        "user": 14090093,
-        "nice": 0,
-        "sys": 23559062,
-        "idle": 289454281,
-        "irq": 2935343
-      },
-      {
-        "model": "AMD Ryzen 7 7800X3D 8-Core Processor           ",
-        "speed": 4192,
-        "user": 14090093,
-        "nice": 0,
-        "sys": 23559062,
-        "idle": 289454281,
-        "irq": 2935343
-      },
-      {
-        "model": "AMD Ryzen 7 7800X3D 8-Core Processor           ",
-        "speed": 4192,
-        "user": 14090093,
-        "nice": 0,
-        "sys": 23559062,
-        "idle": 289454281,
-        "irq": 2935343
-      },
-      {
-        "model": "AMD Ryzen 7 7800X3D 8-Core Processor           ",
-        "speed": 4192,
-        "user": 14090093,
-        "nice": 0,
-        "sys": 23559062,
-        "idle": 289454281,
-        "irq": 2935343
-      },
-      {
-        "model": "AMD Ryzen 7 7800X3D 8-Core Processor           ",
-        "speed": 4192,
-        "user": 14090093,
-        "nice": 0,
-        "sys": 23559062,
-        "idle": 289454281,
-        "irq": 2935343
-      },
-      {
-        "model": "AMD Ryzen 7 7800X3D 8-Core Processor           ",
-        "speed": 4192,
-        "user": 14090093,
-        "nice": 0,
-        "sys": 23559062,
-        "idle": 289454281,
-        "irq": 2935343
-      },
-      {
-        "model": "AMD Ryzen 7 7800X3D 8-Core Processor           ",
-        "speed": 4192,
-        "user": 14090093,
-        "nice": 0,
-        "sys": 23559062,
-        "idle": 289454281,
-        "irq": 2935343
-      },
-      {
-        "model": "AMD Ryzen 7 7800X3D 8-Core Processor           ",
-        "speed": 4192,
-        "user": 14090093,
-        "nice": 0,
-        "sys": 23559062,
-        "idle": 289454281,
-        "irq": 2935343
-      },
-      {
-        "model": "AMD Ryzen 7 7800X3D 8-Core Processor           ",
-        "speed": 4192,
-        "user": 14090093,
-        "nice": 0,
-        "sys": 23559062,
-        "idle": 289454281,
-        "irq": 2935343
-      },
-      {
-        "model": "AMD Ryzen 7 7800X3D 8-Core Processor           ",
-        "speed": 4192,
-        "user": 14090093,
-        "nice": 0,
-        "sys": 23559062,
-        "idle": 289454281,
-        "irq": 2935343
-      },
-      {
-        "model": "AMD Ryzen 7 7800X3D 8-Core Processor           ",
-        "speed": 4192,
-        "user": 14090093,
-        "nice": 0,
-        "sys": 23559062,
-        "idle": 289454281,
-        "irq": 2935343
-      },
-      {
-        "model": "AMD Ryzen 7 7800X3D 8-Core Processor           ",
-        "speed": 4192,
-        "user": 14090093,
-        "nice": 0,
-        "sys": 23559062,
-        "idle": 289454281,
-        "irq": 2935343
-      },
-      {
-        "model": "AMD Ryzen 7 7800X3D 8-Core Processor           ",
-        "speed": 4192,
-        "user": 14090093,
-        "nice": 0,
-        "sys": 23559062,
-        "idle": 289454281,
-        "irq": 2935343
-      },
-      {
-        "model": "AMD Ryzen 7 7800X3D 8-Core Processor           ",
-        "speed": 4192,
-        "user": 14090093,
-        "nice": 0,
-        "sys": 23559062,
-        "idle": 289454281,
-        "irq": 2935343
-      }
-    ],
-    "host": "PC-J"
-  },
-  "javascriptStack": {
-    "message": "No stack.",
-    "stack": [
-      "Unavailable."
-    ]
-  },
-  "nativeStack": [
-    {
-      "pc": "0x00007ff6f2616b89",
-      "symbol": "std::basic_ostream<char,std::char_traits<char> >::operator<<+10841"
-    },
-    {
-      "pc": "0x00007ff6f261a4fc",
-      "symbol": "std::basic_ostream<char,std::char_traits<char> >::operator<<+25548"
-    },
-    {
-      "pc": "0x00007ff6f26194a8",
-      "symbol": "std::basic_ostream<char,std::char_traits<char> >::operator<<+21368"
-    },
-    {
-      "pc": "0x00007ff6f27033db",
-      "symbol": "v8::base::CPU::has_sse+37691"
-    },
-    {
-      "pc": "0x00007ff6f2eea3de",
-      "symbol": "v8::Isolate::ReportExternalAllocationLimitReached+94"
-    },
-    {
-      "pc": "0x00007ff6f2ed272a",
-      "symbol": "v8::SharedArrayBuffer::Externalize+842"
-    },
-    {
-      "pc": "0x00007ff6f2d63e3c",
-      "symbol": "v8::internal::Heap::EphemeronKeyWriteBarrierFromCode+1436"
-    },
-    {
-      "pc": "0x00007ff6f2d6bd5f",
-      "symbol": "v8::internal::Heap::OldGenerationSizeOfObjects+4879"
-    },
-    {
-      "pc": "0x00007ff6f2d62003",
-      "symbol": "v8::internal::Heap::CollectGarbage+1235"
-    },
-    {
-      "pc": "0x00007ff6f2d60894",
-      "symbol": "v8::internal::Heap::AddRetainedMap+2292"
-    },
-    {
-      "pc": "0x00007ff6f2d7f375",
-      "symbol": "v8::internal::Factory::NewFillerObject+53"
-    },
-    {
-      "pc": "0x00007ff6f2b356ed",
-      "symbol": "v8::internal::interpreter::JumpTableTargetOffsets::iterator::operator=+3757"
-    },
-    {
-      "pc": "0x00007ff6f330982d",
-      "symbol": "v8::internal::SetupIsolateDelegate::SetupHeap+614605"
-    },
-    {
-      "pc": "0x00007ff6f327f15d",
-      "symbol": "v8::internal::SetupIsolateDelegate::SetupHeap+47613"
-    },
-    {
-      "pc": "0x00000344e1989c73",
-      "symbol": ""
-    }
-  ],
-  "javascriptHeap": {
-    "totalMemory": 2152337408,
-    "totalCommittedMemory": 2152337408,
-    "usedMemory": 2144986208,
-    "availableMemory": 47672608,
-    "memoryLimit": 2197815296,
-    "heapSpaces": {
-      "read_only_space": {
-        "memorySize": 262144,
-        "committedMemory": 262144,
-        "capacity": 261832,
-        "used": 31960,
-        "available": 229872
-      },
-      "new_space": {
-        "memorySize": 2097152,
-        "committedMemory": 2097152,
-        "capacity": 1047328,
-        "used": 222728,
-        "available": 824600
-      },
-      "old_space": {
-        "memorySize": 2144743424,
-        "committedMemory": 2144743424,
-        "capacity": 2140203632,
-        "used": 2140110712,
-        "available": 92920
-      },
-      "code_space": {
-        "memorySize": 688128,
-        "committedMemory": 688128,
-        "capacity": 516640,
-        "used": 516640,
-        "available": 0
-      },
-      "map_space": {
-        "memorySize": 1052672,
-        "committedMemory": 1052672,
-        "capacity": 691840,
-        "used": 691840,
-        "available": 0
-      },
-      "large_object_space": {
-        "memorySize": 3444736,
-        "committedMemory": 3444736,
-        "capacity": 3408872,
-        "used": 3408872,
-        "available": 0
-      },
-      "code_large_object_space": {
-        "memorySize": 49152,
-        "committedMemory": 49152,
-        "capacity": 3456,
-        "used": 3456,
-        "available": 0
-      },
-      "new_large_object_space": {
-        "memorySize": 0,
-        "committedMemory": 0,
-        "capacity": 1047328,
-        "used": 0,
-        "available": 1047328
-      }
-    }
-  },
-  "resourceUsage": {
-    "userCpuSeconds": 78,
-    "kernelCpuSeconds": 57.906,
-    "cpuConsumptionPercent": 7.90611,
-    "maxRss": 3836321792,
-    "pageFaults": {
-      "IORequired": 1585919,
-      "IONotRequired": 0
-    },
-    "fsActivity": {
-      "reads": 557,
-      "writes": 7
-    }
-  },
-  "libuv": [
-  ],
-  "environmentVariables": {
-    "3DVPATH": "C:\\AMD\\Chipset_Software\\Binaries\\3D_V-Cache_Performance_Optimizer_Driver\\",
-    "=C:": "C:\\Users\\joshu\\Downloads\\paintbynumbersgenerator-master\\paintbynumbersgenerator-master",
-    "ALLUSERSPROFILE": "C:\\ProgramData",
-    "APPDATA": "C:\\Users\\joshu\\AppData\\Roaming",
-    "ChocolateyInstall": "C:\\ProgramData\\chocolatey",
-    "ChocolateyLastPathUpdate": "134127106401206038",
-    "CommonProgramFiles": "C:\\Program Files\\Common Files",
-    "CommonProgramFiles(x86)": "C:\\Program Files (x86)\\Common Files",
-    "CommonProgramW6432": "C:\\Program Files\\Common Files",
-    "COMPUTERNAME": "PC-J",
-    "ComSpec": "C:\\WINDOWS\\system32\\cmd.exe",
-    "DriverData": "C:\\Windows\\System32\\Drivers\\DriverData",
-    "EFC_12024_1592913036": "1",
-    "FPS_BROWSER_APP_PROFILE_STRING": "Internet Explorer",
-    "FPS_BROWSER_USER_PROFILE_STRING": "Default",
-    "HOME": "C:\\Users\\joshu",
-    "HOMEDRIVE": "C:",
-    "HOMEPATH": "\\Users\\joshu",
-    "INIT_CWD": "C:\\Users\\joshu\\Downloads\\paintbynumbersgenerator-master\\paintbynumbersgenerator-master",
-    "LOCALAPPDATA": "C:\\Users\\joshu\\AppData\\Local",
-    "LOGONSERVER": "\\\\PC-J",
-    "NODE": "C:\\nvm4w\\nodejs\\node.exe",
-    "nodejs": "C:\\nvm4w\\nodejs",
-    "NODE_EXE": "C:\\nvm4w\\nodejs\\\\node.exe",
-    "NPM_CLI_JS": "C:\\nvm4w\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
-    "npm_config_access": "",
-    "npm_config_allow_same_version": "",
-    "npm_config_also": "",
-    "npm_config_always_auth": "",
-    "npm_config_argv": "{\"remain\":[],\"cooked\":[\"run\",\"lite\"],\"original\":[\"run\",\"lite\"]}",
-    "npm_config_audit": "true",
-    "npm_config_audit_level": "low",
-    "npm_config_auth_type": "legacy",
-    "npm_config_before": "",
-    "npm_config_bin_links": "true",
-    "npm_config_browser": "",
-    "npm_config_ca": "",
-    "npm_config_cache": "C:\\Users\\joshu\\AppData\\Roaming\\npm-cache",
-    "npm_config_cache_lock_retries": "10",
-    "npm_config_cache_lock_stale": "60000",
-    "npm_config_cache_lock_wait": "10000",
-    "npm_config_cache_max": "Infinity",
-    "npm_config_cache_min": "10",
-    "npm_config_cafile": "",
-    "npm_config_cert": "",
-    "npm_config_cidr": "",
-    "npm_config_color": "true",
-    "npm_config_commit_hooks": "true",
-    "npm_config_depth": "Infinity",
-    "npm_config_description": "true",
-    "npm_config_dev": "",
-    "npm_config_dry_run": "",
-    "npm_config_editor": "notepad.exe",
-    "npm_config_engine_strict": "",
-    "npm_config_fetch_retries": "2",
-    "npm_config_fetch_retry_factor": "10",
-    "npm_config_fetch_retry_maxtimeout": "60000",
-    "npm_config_fetch_retry_mintimeout": "10000",
-    "npm_config_force": "",
-    "npm_config_git": "git",
-    "npm_config_git_tag_version": "true",
-    "npm_config_global": "",
-    "npm_config_globalconfig": "C:\\nvm4w\\nodejs\\etc\\npmrc",
-    "npm_config_globalignorefile": "C:\\nvm4w\\nodejs\\etc\\npmignore",
-    "npm_config_global_style": "",
-    "npm_config_group": "",
-    "npm_config_ham_it_up": "",
-    "npm_config_heading": "npm",
-    "npm_config_https_proxy": "",
-    "npm_config_if_present": "",
-    "npm_config_ignore_prepublish": "",
-    "npm_config_ignore_scripts": "",
-    "npm_config_init_author_email": "",
-    "npm_config_init_author_name": "",
-    "npm_config_init_author_url": "",
-    "npm_config_init_license": "ISC",
-    "npm_config_init_module": "C:\\Users\\joshu\\.npm-init.js",
-    "npm_config_init_version": "1.0.0",
-    "npm_config_json": "",
-    "npm_config_key": "",
-    "npm_config_legacy_bundling": "",
-    "npm_config_link": "",
-    "npm_config_local_address": "",
-    "npm_config_loglevel": "notice",
-    "npm_config_logs_max": "10",
-    "npm_config_long": "",
-    "npm_config_maxsockets": "50",
-    "npm_config_message": "%s",
-    "npm_config_metrics_registry": "https://registry.npmjs.org/",
-    "npm_config_node_gyp": "C:\\Users\\joshu\\AppData\\Local\\nvm\\v12.7.0\\node_modules\\npm\\node_modules\\node-gyp\\bin\\node-gyp.js",
-    "npm_config_node_options": "",
-    "npm_config_node_version": "12.7.0",
-    "npm_config_noproxy": "",
-    "npm_config_offline": "",
-    "npm_config_onload_script": "",
-    "npm_config_only": "",
-    "npm_config_optional": "true",
-    "npm_config_otp": "",
-    "npm_config_package_lock": "true",
-    "npm_config_package_lock_only": "",
-    "npm_config_parseable": "",
-    "npm_config_prefer_offline": "",
-    "npm_config_prefer_online": "",
-    "npm_config_prefix": "C:\\nvm4w\\nodejs",
-    "npm_config_preid": "",
-    "npm_config_production": "",
-    "npm_config_progress": "true",
-    "npm_config_proxy": "",
-    "npm_config_read_only": "",
-    "npm_config_rebuild_bundle": "true",
-    "npm_config_registry": "https://registry.npmjs.org/",
-    "npm_config_rollback": "true",
-    "npm_config_save": "true",
-    "npm_config_save_bundle": "",
-    "npm_config_save_dev": "",
-    "npm_config_save_exact": "",
-    "npm_config_save_optional": "",
-    "npm_config_save_prefix": "^",
-    "npm_config_save_prod": "",
-    "npm_config_scope": "",
-    "npm_config_scripts_prepend_node_path": "warn-only",
-    "npm_config_script_shell": "",
-    "npm_config_searchexclude": "",
-    "npm_config_searchlimit": "20",
-    "npm_config_searchopts": "",
-    "npm_config_searchstaleness": "900",
-    "npm_config_send_metrics": "",
-    "npm_config_shell": "C:\\WINDOWS\\system32\\cmd.exe",
-    "npm_config_shrinkwrap": "true",
-    "npm_config_sign_git_commit": "",
-    "npm_config_sign_git_tag": "",
-    "npm_config_sso_poll_frequency": "500",
-    "npm_config_sso_type": "oauth",
-    "npm_config_strict_ssl": "true",
-    "npm_config_tag": "latest",
-    "npm_config_tag_version_prefix": "v",
-    "npm_config_timing": "",
-    "npm_config_tmp": "C:\\Users\\joshu\\AppData\\Local\\Temp",
-    "npm_config_umask": "0000",
-    "npm_config_unicode": "",
-    "npm_config_unsafe_perm": "true",
-    "npm_config_update_notifier": "true",
-    "npm_config_usage": "",
-    "npm_config_user": "",
-    "npm_config_userconfig": "C:\\Users\\joshu\\.npmrc",
-    "npm_config_user_agent": "npm/6.10.0 node/v12.7.0 win32 x64",
-    "npm_config_version": "",
-    "npm_config_versions": "",
-    "npm_config_viewer": "browser",
-    "npm_execpath": "C:\\Users\\joshu\\AppData\\Local\\nvm\\v12.7.0\\node_modules\\npm\\bin\\npm-cli.js",
-    "npm_lifecycle_event": "lite",
-    "npm_lifecycle_script": "lite-server --port 10001",
-    "npm_node_execpath": "C:\\nvm4w\\nodejs\\node.exe",
-    "npm_package_author_name": "drake7707",
-    "npm_package_bin_paint_by_numbers_generator": "./src-cli/main.js",
-    "npm_package_dependencies_canvas": "2.5.0",
-    "npm_package_dependencies_minimist": "^1.2.3",
-    "npm_package_dependencies_svg2img": "^0.6.1",
-    "npm_package_dependencies__types_jquery": "^3.3.31",
-    "npm_package_dependencies__types_materialize_css": "^1.0.6",
-    "npm_package_dependencies__types_minimist": "^1.2.0",
-    "npm_package_description": "Paint by numbers generator",
-    "npm_package_devDependencies_lite_server": "^1.3.1",
-    "npm_package_devDependencies__types_node": "^12.7.1",
-    "npm_package_name": "paint-by-numbers-generator",
-    "npm_package_readmeFilename": "README.md",
-    "npm_package_scripts_lite": "lite-server --port 10001",
-    "npm_package_scripts_start": "npm run lite",
-    "npm_package_version": "1.0.0",
-    "NPM_PREFIX_NPM_CLI_JS": "C:\\nvm4w\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
-    "NUMBER_OF_PROCESSORS": "16",
-    "NVM_HOME": "C:\\Users\\joshu\\AppData\\Local\\nvm",
-    "NVM_SYMLINK": "C:\\nvm4w\\nodejs",
-    "OneDrive": "C:\\Users\\joshu\\OneDrive",
-    "OneDriveConsumer": "C:\\Users\\joshu\\OneDrive",
-    "OS": "Windows_NT",
-    "Path": "C:\\Users\\joshu\\AppData\\Local\\nvm\\v12.7.0\\node_modules\\npm\\node_modules\\npm-lifecycle\\node-gyp-bin;C:\\Users\\joshu\\Downloads\\paintbynumbersgenerator-master\\paintbynumbersgenerator-master\\node_modules\\.bin;C:\\Users\\joshu\\AppData\\Local\\nvm\\v12.7.0\\node_modules\\npm\\node_modules\\npm-lifecycle\\node-gyp-bin;C:\\Users\\joshu\\Downloads\\paintbynumbersgenerator-master\\paintbynumbersgenerator-master\\node_modules\\.bin;C:\\Python314\\Scripts\\;C:\\Python314\\;C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem;C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\;C:\\WINDOWS\\System32\\OpenSSH\\;C:\\Program Files\\NVIDIA Corporation\\NVIDIA App\\NvDLISR;C:\\Program Files (x86)\\NVIDIA Corporation\\PhysX\\Common;C:\\Program Files\\dotnet\\;C:\\Program Files\\Docker\\Docker\\resources\\bin;C:\\Program Files\\Arduino PLC IDE Tools\\;C:\\ProgramData\\chocolatey\\bin;C:\\Users\\joshu\\AppData\\Local\\nvm;C:\\nvm4w\\nodejs;C:\\Program Files (x86)\\Arm GNU Toolchain arm-none-eabi\\14.3 rel1\\bin;C:\\Users\\joshu\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Users\\joshu\\AppData\\Local\\Programs\\Microsoft VS Code\\bin;C:\\Users\\joshu\\AppData\\Local\\nvm;C:\\nvm4w\\nodejs",
-    "PATHEXT": ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JSE;.WSF;.WSH;.MSC;.PY;.PYW",
-    "PROCESSOR_ARCHITECTURE": "AMD64",
-    "PROCESSOR_IDENTIFIER": "AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD",
-    "PROCESSOR_LEVEL": "25",
-    "PROCESSOR_REVISION": "6102",
-    "ProgramData": "C:\\ProgramData",
-    "ProgramFiles": "C:\\Program Files",
-    "ProgramFiles(x86)": "C:\\Program Files (x86)",
-    "ProgramW6432": "C:\\Program Files",
-    "PROMPT": "$P$G",
-    "PSModulePath": "C:\\Program Files\\WindowsPowerShell\\Modules;C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\Modules",
-    "PUBLIC": "C:\\Users\\Public",
-    "SESSIONNAME": "Console",
-    "SystemDrive": "C:",
-    "SystemRoot": "C:\\WINDOWS",
-    "TEMP": "C:\\Users\\joshu\\AppData\\Local\\Temp",
-    "TMP": "C:\\Users\\joshu\\AppData\\Local\\Temp",
-    "URL": "http://localhost:10001",
-    "USERDOMAIN": "PC-J",
-    "USERDOMAIN_ROAMINGPROFILE": "PC-J",
-    "USERNAME": "joshu",
-    "USERPROFILE": "C:\\Users\\joshu",
-    "windir": "C:\\WINDOWS"
-  },
-  "sharedObjects": [
-    "C:\\nvm4w\\nodejs\\node.exe",
-    "C:\\WINDOWS\\SYSTEM32\\ntdll.dll",
-    "C:\\WINDOWS\\System32\\KERNEL32.DLL",
-    "C:\\WINDOWS\\System32\\KERNELBASE.dll",
-    "C:\\WINDOWS\\System32\\WS2_32.dll",
-    "C:\\WINDOWS\\System32\\ucrtbase.dll",
-    "C:\\WINDOWS\\SYSTEM32\\dbghelp.dll",
-    "C:\\WINDOWS\\System32\\RPCRT4.dll",
-    "C:\\WINDOWS\\System32\\combase.dll",
-    "C:\\WINDOWS\\System32\\ADVAPI32.dll",
-    "C:\\WINDOWS\\System32\\OLEAUT32.dll",
-    "C:\\WINDOWS\\System32\\msvcrt.dll",
-    "C:\\WINDOWS\\System32\\msvcp_win.dll",
-    "C:\\WINDOWS\\System32\\sechost.dll",
-    "C:\\WINDOWS\\System32\\USER32.dll",
-    "C:\\WINDOWS\\System32\\win32u.dll",
-    "C:\\WINDOWS\\System32\\GDI32.dll",
-    "C:\\WINDOWS\\System32\\gdi32full.dll",
-    "C:\\WINDOWS\\System32\\PSAPI.DLL",
-    "C:\\WINDOWS\\System32\\CRYPT32.dll",
-    "C:\\WINDOWS\\SYSTEM32\\IPHLPAPI.DLL",
-    "C:\\WINDOWS\\SYSTEM32\\bcrypt.dll",
-    "C:\\WINDOWS\\SYSTEM32\\WINMM.dll",
-    "C:\\WINDOWS\\SYSTEM32\\USERENV.dll",
-    "C:\\WINDOWS\\System32\\IMM32.DLL",
-    "C:\\WINDOWS\\SYSTEM32\\powrprof.dll",
-    "C:\\WINDOWS\\SYSTEM32\\UMPDC.dll",
-    "C:\\WINDOWS\\system32\\uxtheme.dll",
-    "C:\\WINDOWS\\system32\\mswsock.dll",
-    "C:\\WINDOWS\\SYSTEM32\\kernel.appcore.dll",
-    "C:\\WINDOWS\\System32\\bcryptprimitives.dll",
-    "C:\\WINDOWS\\SYSTEM32\\CRYPTBASE.DLL",
-    "C:\\WINDOWS\\System32\\NSI.dll",
-    "C:\\WINDOWS\\SYSTEM32\\dhcpcsvc6.DLL",
-    "C:\\WINDOWS\\SYSTEM32\\dhcpcsvc.DLL",
-    "C:\\WINDOWS\\SYSTEM32\\DNSAPI.dll",
-    "C:\\Windows\\System32\\rasadhlp.dll",
-    "C:\\WINDOWS\\System32\\fwpuclnt.dll",
-    "C:\\WINDOWS\\system32\\napinsp.dll",
-    "C:\\WINDOWS\\System32\\winrnr.dll",
-    "C:\\WINDOWS\\system32\\nlansp_c.dll",
-    "C:\\WINDOWS\\system32\\wshbth.dll"
-  ]
-}
---- END FILE: .\report.20260112.225834.29868.0.001.json ---
-
-
 --- START FILE: .\report.20260112.225841.45404.0.001.json ---
 
 {
@@ -6626,1412 +5242,6 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
 --- END FILE: .\report.20260117.142506.10308.0.001.json ---
 
 
---- START FILE: .\runtime-manual-recolor.js ---
-/*
- * PaintByNumbersGenerator – Runtime Manual Recolor v1.0
- * 
- * Enables manual recoloring of individual facets by clicking in the finished SVG.
- */
-
-(() => {
-  'use strict';
-
-  const STATE = {
-    active: false,
-    facetResult: null,
-    colorsByIndex: null, // The real RGB values
-    selectedFacetId: null
-  };
-
-  function $(id) { return document.getElementById(id); }
-
-  // --- UI ---
-  function injectUI() {
-    const parent = document.querySelector('#options-pane .collection');
-    if (!parent || $('pbnManualRecolorItem')) return;
-
-    const li = document.createElement('li');
-    li.id = 'pbnManualRecolorItem';
-    li.className = 'collection-item';
-    
-    li.innerHTML = `
-      <div class="row" style="margin-bottom:0; display:flex; align-items:center;">
-        <div class="col s8">
-           <label style="font-size:1rem; color:#000; font-weight:500;">🖊️ Recolor Facets</label>
-           <p style="font-size:0.8rem; margin:0; color:#666;">
-             Enable this, then click an area in the <b>output image</b> below.
-           </p>
-        </div>
-        <div class="col s4" style="text-align:right;">
-           <div class="switch">
-            <label>
-              Off
-              <input id="chkManualRecolor" type="checkbox">
-              <span class="lever"></span>
-              On
-            </label>
-          </div>
-        </div>
-      </div>
-    `;
-
-    // Insert after the Protection Item (or at the end)
-    const ref = $('pbnProtectionItem');
-    if(ref) ref.parentNode.insertBefore(li, ref.nextSibling);
-    else parent.appendChild(li);
-
-    // Event
-    $('chkManualRecolor').addEventListener('change', (e) => {
-        STATE.active = e.target.checked;
-        updateCursor();
-    });
-
-    // Create color picker modal
-    createColorModal();
-  }
-
-  function createColorModal() {
-    if($('pbnColorModal')) return;
-
-    const div = document.createElement('div');
-    div.id = 'pbnColorModal';
-    div.className = 'modal';
-    div.style.cssText = 'max-width: 400px; max-height: 80%;';
-    
-    div.innerHTML = `
-      <div class="modal-content">
-        <h5>Select Color</h5>
-        <p>Choose a new color for the selected facet.</p>
-        <div id="pbnColorGrid" style="display:flex; flex-wrap:wrap; gap:5px; justify-content:center;"></div>
-      </div>
-      <div class="modal-footer">
-        <a href="#!" class="modal-close waves-effect waves-green btn-flat">Cancel</a>
-      </div>
-    `;
-    
-    document.body.appendChild(div);
-    // Materialize Modal init
-    if(M && M.Modal) M.Modal.init(div);
-  }
-
-  function updateCursor() {
-    const svgContainer = $('svgContainer');
-    if(!svgContainer) return;
-    svgContainer.style.cursor = STATE.active ? 'pointer' : 'default';
-  }
-
-  // --- LOGIC ---
-
-  // We need access to the data (facetResult). We patch createSVG to intercept the reference.
-  function patchProcessManager() {
-      if (typeof window.require !== 'function') return;
-
-      window.require(['guiprocessmanager'], function(GUI) {
-          if (!GUI || !GUI.GUIProcessManager) return;
-          
-          const originalCreateSVG = GUI.GUIProcessManager.createSVG;
-          
-          GUI.GUIProcessManager.createSVG = async function(facetResult, colorsByIndex, sizeMultiplier, fill, stroke, addColorLabels, fontSize, fontColor, onUpdate) {
-              
-              // STORE DATA
-              STATE.facetResult = facetResult;
-              STATE.colorsByIndex = colorsByIndex;
-              
-              // Run original
-              return await originalCreateSVG.call(this, facetResult, colorsByIndex, sizeMultiplier, fill, stroke, addColorLabels, fontSize, fontColor, onUpdate);
-          };
-          
-          console.log("✅ GUIProcessManager patched for Manual Recolor.");
-      });
-  }
-
-  function attachSvgListeners() {
-      const svg = document.querySelector('#svgContainer svg');
-      if(!svg) return;
-
-      // We use event delegation on the SVG because there are thousands of paths
-      svg.addEventListener('click', (e) => {
-          if(!STATE.active) return;
-          
-          const target = e.target;
-          // Check if it is a path (facet) or text (label)
-          // We look for the data-facetId attribute
-          let facetId = target.getAttribute('data-facetId');
-          
-          // If clicking on a label, we often hit <g> or <text>
-          // Unfortunately labels have no DOM ID link in the original code.
-          
-          if (!facetId) {
-             // Click was on text or border
-             return; 
-          }
-          
-          e.preventDefault();
-          e.stopPropagation();
-          
-          openColorPicker(parseInt(facetId));
-      });
-      
-      // Hover effect
-      svg.addEventListener('mouseover', (e) => {
-          if(!STATE.active) return;
-          if(e.target.tagName === 'path' && e.target.hasAttribute('data-facetId')) {
-              e.target.style.opacity = '0.5';
-          }
-      });
-      svg.addEventListener('mouseout', (e) => {
-          if(!STATE.active) return;
-          if(e.target.tagName === 'path') {
-              e.target.style.opacity = '1';
-          }
-      });
-  }
-
-  function openColorPicker(facetId) {
-      STATE.selectedFacetId = facetId;
-      const facet = STATE.facetResult.facets[facetId];
-      if(!facet) return;
-
-      const grid = $('pbnColorGrid');
-      grid.innerHTML = '';
-      
-      const currentColorIdx = facet.color;
-      
-      // Render palette
-      STATE.colorsByIndex.forEach((rgb, idx) => {
-          const colorStr = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
-          const div = document.createElement('div');
-          
-          const isSelected = (idx === currentColorIdx);
-          
-          div.style.cssText = `
-            width: 40px; height: 40px; 
-            background-color: ${colorStr};
-            border: ${isSelected ? '3px solid red' : '1px solid #ccc'};
-            cursor: pointer;
-            border-radius: 4px;
-            display: flex; align-items: center; justify-content: center;
-            font-weight: bold;
-            color: ${getContrastYIQ(colorStr)};
-            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
-          `;
-          
-          // Show the "new number" from the palette DOM (safest source)
-          const paletteDom = document.querySelectorAll('#palette .color');
-          let label = idx; // Fallback: index 0..N
-          if(paletteDom && paletteDom[idx]) {
-              label = paletteDom[idx].innerText; // The number the user sees (1..N)
-          }
-          div.innerText = label;
-          
-          div.onclick = () => applyColorChange(facetId, idx);
-          
-          grid.appendChild(div);
-      });
-
-      const modal = M.Modal.getInstance($('pbnColorModal'));
-      modal.open();
-  }
-
-  function applyColorChange(facetId, newColorIndex) {
-      if(!STATE.facetResult) return;
-      
-      // 1. Change data
-      STATE.facetResult.facets[facetId].color = newColorIndex;
-      
-      // 2. Close modal
-      const modal = M.Modal.getInstance($('pbnColorModal'));
-      modal.close();
-      
-      // 3. Re-render SVG
-      window.require(['gui'], function(GUI) {
-         if(GUI && GUI.updateOutput) {
-             GUI.updateOutput();
-             M.toast({html: 'Facet recolored!', classes: 'rounded green'});
-         }
-      });
-  }
-
-  // Helper
-  function getContrastYIQ(rgbStr){
-    const parts = rgbStr.match(/\d+/g);
-    if(!parts) return 'black';
-    const r = parseInt(parts[0]);
-    const g = parseInt(parts[1]);
-    const b = parseInt(parts[2]);
-    var yiq = ((r*299)+(g*587)+(b*114))/1000;
-    return (yiq >= 128) ? 'black' : 'white';
-  }
-
-  // --- INIT ---
-  function init() {
-      setTimeout(injectUI, 1000);
-      setTimeout(patchProcessManager, 2000);
-      
-      // SVG listeners must be reattached when the SVG is rebuilt
-      const container = $('svgContainer');
-      if(container) {
-          const obs = new MutationObserver(() => {
-              attachSvgListeners();
-              updateCursor();
-          });
-          obs.observe(container, {childList: true});
-      }
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
-    init();
-  }
-
-})();
-
---- END FILE: .\runtime-manual-recolor.js ---
-
-
---- START FILE: .\runtime-protection.js ---
-/*
- * PaintByNumbersGenerator – Runtime Protection v3.2 (Single Interaction & Persistence)
- * 
- * Features:
- * - Interaktiver Schutz öffnet sich nur beim ersten Bereinigungs-Durchlauf.
- * - Speichert Koordinaten der geschützten Bereiche, um sie in Folgedurchläufen (wo sich IDs ändern) automatisch wiederzufinden.
- * - Zoom & Smart Filter inklusive.
- */
-
-(() => {
-  'use strict';
-
-  // --- STATE ---
-  const STATE = {
-    enabled: false,
-    isPaused: false,
-    hasShownUI: false, // Neu: Merkt sich, ob wir schon gefragt haben
-    
-    // Daten
-    protectedIds: new Set(),      // Aktuelle IDs im laufenden Step
-    protectedCoords: [],          // Neu: Permanente Koordinaten {x,y} für Folgedurchläufe
-    candidates: new Set(),
-    ignoredIds: new Set(),
-    
-    // Referenzen
-    facetResult: null,
-    colorsByIndex: null,
-    resolveFunc: null,
-    
-    // UI Settings
-    zoomLevel: 2.0,      
-    filterPercent: 50,   
-    
-    // Canvas
-    canvas: null,
-    ctx: null
-  };
-
-  // --- DOM HELPERS ---
-  function $(id) { return document.getElementById(id); }
-
-  // --- UI INTEGRATION ---
-  function injectUI() {
-    const parent = document.querySelector('#options-pane .collection');
-    if (!parent || $('pbnProtectionItem')) return;
-
-    const li = document.createElement('li');
-    li.id = 'pbnProtectionItem';
-    li.className = 'collection-item';
-    
-    li.innerHTML = `
-      <div class="row" style="margin-bottom:0;">
-        <div class="col s12">
-           <label style="font-size:1rem; color:#000; font-weight:500;">🛡️ Interaktiver Detailschutz v3.2</label>
-        </div>
-        
-        <div class="col s4" style="margin-top:10px;">
-           <div class="switch">
-            <label>
-              Aus
-              <input id="chkEnableProtection" type="checkbox">
-              <span class="lever"></span>
-              An
-            </label>
-          </div>
-        </div>
-
-        <div class="input-field col s4" style="margin-top:0;">
-            <input id="txtProtectionZoom" type="number" value="2" min="1" max="10" step="0.5">
-            <label for="txtProtectionZoom" class="active">Vorschau Zoom (x)</label>
-        </div>
-
-        <div class="input-field col s4" style="margin-top:0;">
-            <input id="txtProtectionFilter" type="number" value="50" min="0" max="100">
-            <label for="txtProtectionFilter" class="active">Filter % (Staub)</label>
-        </div>
-        
-        <div class="col s12">
-            <p style="font-size:0.8rem; margin:0; color:#666;">
-            Pausiert <b>einmalig</b> beim ersten Durchlauf. <br>
-            <b>Rot:</b> Wird gelöscht. <b>Grün:</b> Gerettet (auch für Folgedurchläufe).
-            </p>
-        </div>
-      </div>
-    `;
-
-    parent.insertBefore(li, parent.children[3]);
-
-    // Bindings
-    $('chkEnableProtection').addEventListener('change', (e) => STATE.enabled = e.target.checked);
-    
-    $('txtProtectionZoom').addEventListener('change', (e) => {
-        STATE.zoomLevel = parseFloat(e.target.value) || 1;
-        if(STATE.isPaused) drawInteractiveScreen(); 
-    });
-
-    $('txtProtectionFilter').addEventListener('change', (e) => {
-        STATE.filterPercent = parseInt(e.target.value) || 0;
-        if(STATE.isPaused) {
-            recalcCandidates(STATE.threshold);
-            drawInteractiveScreen();
-        }
-    });
-
-    // Reset State wenn User "Process Image" drückt
-    const processBtn = $('btnProcess');
-    if (processBtn) {
-        processBtn.addEventListener('click', () => {
-            STATE.hasShownUI = false;
-            STATE.protectedCoords = [];
-            STATE.protectedIds.clear();
-        });
-    }
-
-    const floatBtn = document.createElement('div');
-    floatBtn.id = 'pbnContinueBtn';
-    floatBtn.style.cssText = `
-        position: fixed; bottom: 30px; right: 30px; z-index: 9999;
-        display: none; padding: 15px 25px; background: #26a69a; color: white;
-        font-weight: bold; font-size: 16px; border-radius: 50px;
-        box-shadow: 0 4px 10px rgba(0,0,0,0.3); cursor: pointer;
-        transition: transform 0.2s;
-    `;
-    floatBtn.innerHTML = 'Weiter <i class="material-icons" style="vertical-align:middle;">play_arrow</i>';
-    floatBtn.onclick = resumeProcess;
-    document.body.appendChild(floatBtn);
-
-    const style = document.createElement('style');
-    style.textContent = `
-        #reduction-pane {
-            overflow: auto !important;
-            max-height: 80vh;
-            background: #e0e0e0;
-            text-align: center;
-        }
-        #cReduction {
-            margin: 0 auto;
-            box-shadow: 0 0 20px rgba(0,0,0,0.2);
-            background: white;
-            image-rendering: pixelated;
-        }
-    `;
-    document.head.appendChild(style);
-}
-
-  // --- LOGIC HELPER ---
-
-  // Findet einen repräsentativen Punkt (x,y) innerhalb einer Facette
-  // Wird benötigt, um die Facette in späteren Durchläufen wiederzufinden
-  function getRepresentativePoint(facetId, facetResult) {
-      const f = facetResult.facets[facetId];
-      if (!f) return null;
-
-      // Wir scannen die Bounding Box, bis wir einen Pixel finden, der zur ID gehört
-      for (let y = f.bbox.minY; y <= f.bbox.maxY; y++) {
-          for (let x = f.bbox.minX; x <= f.bbox.maxX; x++) {
-              if (facetResult.facetMap.get(x, y) === facetId) {
-                  return { x, y };
-              }
-          }
-      }
-      return null;
-  }
-
-  function recalcCandidates(smallerThan) {
-      if (!STATE.facetResult) return;
-      STATE.candidates.clear();
-      STATE.ignoredIds.clear();
-      
-      const minSize = Math.floor(smallerThan * (STATE.filterPercent / 100));
-
-      for (const f of STATE.facetResult.facets) {
-          if (!f) continue;
-          if (f.pointCount < smallerThan) {
-              if (f.pointCount < minSize) {
-                  STATE.ignoredIds.add(f.id); 
-              } else {
-                  STATE.candidates.add(f.id);
-              }
-          }
-      }
-      
-      const btn = $('pbnContinueBtn');
-      if(btn) btn.innerHTML = `Weiter (${STATE.candidates.size} Bereiche löschen) <i class="material-icons" style="vertical-align:middle;">play_arrow</i>`;
-  }
-
-  function drawInteractiveScreen() {
-    if (!STATE.canvas || !STATE.facetResult) return;
-    
-    const width = STATE.facetResult.width;
-    const height = STATE.facetResult.height;
-    const map = STATE.facetResult.facetMap;
-    const colors = STATE.colorsByIndex; 
-    
-    const displayW = Math.floor(width * STATE.zoomLevel);
-    const displayH = Math.floor(height * STATE.zoomLevel);
-    
-    STATE.canvas.width = displayW;
-    STATE.canvas.height = displayH;
-    
-    STATE.ctx.scale(STATE.zoomLevel, STATE.zoomLevel);
-
-    const bgCanvas = document.createElement('canvas');
-    bgCanvas.width = width;
-    bgCanvas.height = height;
-    const bgCtx = bgCanvas.getContext('2d');
-    const imgData = bgCtx.createImageData(width, height);
-    const data = imgData.data;
-
-    for (let i = 0; i < width * height; i++) {
-        const x = i % width;
-        const y = Math.floor(i / width);
-        const id = map.get(x, y);
-        
-        let r=255, g=255, b=255;
-        
-        const facet = STATE.facetResult.facets[id];
-        if (facet) {
-            const col = colors[facet.color]; 
-            r = col[0]; g = col[1]; b = col[2];
-            
-            if (STATE.protectedIds.has(id)) {
-                r = (r + 0) / 2; g = (g + 255) / 2; b = (b + 0) / 2;
-            } else if (STATE.candidates.has(id)) {
-                r = (r + 255) / 2; g = (g + 0) / 2; b = (b + 0) / 2;
-            } else if (STATE.ignoredIds.has(id)) {
-                r = (r + 200) / 2; g = (g + 200) / 2; b = (b + 200) / 2;
-            }
-        }
-
-        const idx = i * 4;
-        data[idx] = r; data[idx+1] = g; data[idx+2] = b; data[idx+3] = 255;
-    }
-    
-    bgCtx.putImageData(imgData, 0, 0);
-
-    STATE.ctx.imageSmoothingEnabled = false;
-    STATE.ctx.drawImage(bgCanvas, 0, 0);
-
-    STATE.ctx.fillStyle = "rgba(0,0,0,0.5)"; 
-    
-    const drawBorders = (id, color) => {
-        const f = STATE.facetResult.facets[id];
-        if (!f || !f.borderPoints) return;
-
-        STATE.ctx.fillStyle = color;
-        for (const pt of f.borderPoints) {
-            STATE.ctx.fillRect(pt.x, pt.y, 1, 1);
-        }
-    };
-
-    STATE.candidates.forEach(id => {
-        if (!STATE.protectedIds.has(id)) drawBorders(id, "rgba(200, 0, 0, 0.8)");
-    });
-
-    STATE.protectedIds.forEach(id => {
-        drawBorders(id, "rgba(0, 150, 0, 0.9)");
-    });
-  }
-
-  function handleCanvasClick(e) {
-    if (!STATE.isPaused || !STATE.facetResult) return;
-
-    const rect = STATE.canvas.getBoundingClientRect();
-    const scaleX = STATE.canvas.width / rect.width;
-    const scaleY = STATE.canvas.height / rect.height;
-
-    const canvasX = (e.clientX - rect.left) * scaleX;
-    const canvasY = (e.clientY - rect.top) * scaleY;
-
-    const originalX = Math.floor(canvasX / STATE.zoomLevel);
-    const originalY = Math.floor(canvasY / STATE.zoomLevel);
-
-    if (originalX < 0 || originalX >= STATE.facetResult.width || originalY < 0 || originalY >= STATE.facetResult.height) return;
-
-    const id = STATE.facetResult.facetMap.get(originalX, originalY);
-
-    if (STATE.candidates.has(id) || STATE.ignoredIds.has(id)) {
-        if (STATE.protectedIds.has(id)) {
-            STATE.protectedIds.delete(id);
-        } else {
-            STATE.protectedIds.add(id);
-        }
-        requestAnimationFrame(drawInteractiveScreen);
-    }
-  }
-
-  function resumeProcess() {
-    if (STATE.resolveFunc) {
-        // Jetzt speichern wir die Koordinaten der geschützten Facetten für später
-        STATE.protectedCoords = [];
-        STATE.protectedIds.forEach(id => {
-            const pt = getRepresentativePoint(id, STATE.facetResult);
-            if (pt) STATE.protectedCoords.push(pt);
-        });
-
-        // UI Reset
-        $('pbnContinueBtn').style.display = 'none';
-        STATE.canvas.style.cursor = 'default';
-        STATE.canvas.removeEventListener('mousedown', handleCanvasClick);
-        STATE.isPaused = false;
-        
-        // Merken dass wir fertig sind
-        STATE.hasShownUI = true;
-
-        STATE.resolveFunc();
-    }
-  }
-
-  // --- PATCH ---
-  function patchFacetReducer() {
-    if (typeof window.require !== 'function') return;
-
-    window.require(['facetReducer'], function(FacetReducerModule) {
-      if (!FacetReducerModule || !FacetReducerModule.FacetReducer) return;
-
-      const FacetReducer = FacetReducerModule.FacetReducer;
-      
-      if (!FacetReducer._originalReduceFacets) {
-        FacetReducer._originalReduceFacets = FacetReducer.reduceFacets;
-      }
-
-      FacetReducer.reduceFacets = async function(smallerThan, removeLargeToSmall, maxFacets, colors, facetResult, imgIndices, onUpdate) {
-        
-        if (!STATE.enabled) {
-            return await FacetReducer._originalReduceFacets.call(this, smallerThan, removeLargeToSmall, maxFacets, colors, facetResult, imgIndices, onUpdate);
-        }
-
-        // --- Logik für Durchlauf ---
-        
-        STATE.facetResult = facetResult;
-        STATE.colorsByIndex = colors;
-        STATE.threshold = smallerThan;
-        
-        // Liste für den aktuellen Durchlauf leeren
-        STATE.protectedIds.clear();
-
-        // 1. Wenn UI noch nicht gezeigt wurde (Erster Durchlauf): Interaktion
-        if (!STATE.hasShownUI) {
-            console.log(`[Protection] First run. Pausing for user interaction.`);
-            STATE.isPaused = true;
-            
-            recalcCandidates(smallerThan);
-
-            const tabs = M.Tabs.getInstance($('tabsOutput'));
-            if (tabs) tabs.select('reduction-pane');
-            
-            STATE.canvas = $('cReduction');
-            STATE.ctx = STATE.canvas.getContext('2d');
-            
-            STATE.canvas.addEventListener('mousedown', handleCanvasClick);
-            STATE.canvas.style.cursor = 'crosshair';
-
-            drawInteractiveScreen();
-
-            const btn = $('pbnContinueBtn');
-            btn.style.display = 'block';
-            
-            // WARTEN auf User
-            await new Promise(resolve => STATE.resolveFunc = resolve);
-            
-            if(btn) btn.innerHTML = "Verarbeite...";
-            await new Promise(r => setTimeout(r, 50)); 
-        } 
-        // 2. Wenn UI schon gezeigt wurde (Folge-Durchläufe): Automatisch schützen
-        else {
-            console.log(`[Protection] Subsequent run. Auto-protecting based on coordinates.`);
-            // Wir nutzen die gespeicherten Koordinaten, um die IDs im *neuen* facetResult zu finden
-            // Da sich die IDs zwischen den Durchläufen ändern können (Neuaufbau der Facetten)
-            if (STATE.protectedCoords.length > 0) {
-                STATE.protectedCoords.forEach(pt => {
-                    if (pt.x < facetResult.width && pt.y < facetResult.height) {
-                        const currentId = facetResult.facetMap.get(pt.x, pt.y);
-                        STATE.protectedIds.add(currentId);
-                    }
-                });
-            }
-        }
-
-        // 3. Schutz anwenden (Hack: PointCount riesig machen)
-        const restoreList = [];
-        STATE.protectedIds.forEach(id => {
-            const facet = facetResult.facets[id];
-            if (facet) {
-                restoreList.push({ facet: facet, origCount: facet.pointCount });
-                facet.pointCount = 999999999; 
-            }
-        });
-
-        // 4. Original ausführen
-        await FacetReducer._originalReduceFacets.call(this, smallerThan, removeLargeToSmall, maxFacets, colors, facetResult, imgIndices, onUpdate);
-
-        // 5. Restore (damit Labels nicht explodieren oder so)
-        restoreList.forEach(item => {
-            if (item.facet) item.facet.pointCount = item.origCount;
-        });
-      };
-      
-      console.log("✅ FacetReducer patched for Interactive Mode v3.2 (Single Prompt).");
-    });
-  }
-
-  // --- INIT ---
-  function init() {
-    setTimeout(injectUI, 1000);
-    setTimeout(patchFacetReducer, 2000);
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
-    init();
-  }
-
-})();
---- END FILE: .\runtime-protection.js ---
-
-
---- START FILE: .\runtime-recolor.js ---
-/*
- * PaintByNumbersGenerator – Runtime Recolor v4.3 (Sync Fix + Highlighting)
- * 
- * Features:
- * 1. Live Recolor (SVG + HTML UI)
- * 2. Intelligent Sorting (White -> Chromatic -> Black)
- * 3. Stable Renumbering (Fixes sync issues between image and palette)
- * 4. Visual Connection: Hover over a color in the list to highlight it in the SVG.
- * 5. Persistence: Keeps custom colors when resizing image.
- */
-
-(() => {
-  'use strict';
-
-  // --- STATE MANAGEMENT ---
-  const STATE = {
-    // Array of objects
-    palette: [], 
-    // Map: "originalHex" -> "newHex"
-    mapping: new Map(),
-    // Map: "originalIndex" (string) -> "newIndex" (number)
-    indexMap: new Map() 
-  };
-
-  // --- DOM HELPERS ---
-  function $(sel, root = document) { return root.querySelector(sel); }
-  function $all(sel, root = document) { return Array.from(root.querySelectorAll(sel)); }
-
-  function getSvg() {
-    const c = $('#svgContainer');
-    return c ? c.querySelector('svg') : null;
-  }
-
-  function injectStyles() {
-    if ($('#pbn-styles')) return;
-    const style = document.createElement('style');
-    style.id = 'pbn-styles';
-    style.textContent = `
-      .pbn-highlight-path {
-        stroke: #ff0000 !important;
-        stroke-width: 3px !important;
-        vector-effect: non-scaling-stroke;
-        opacity: 0.9 !important;
-      }
-      .pbn-highlight-text {
-        fill: #ff0000 !important;
-        font-weight: bold;
-        font-size: 1.2em;
-      }
-      .pbn-row-hover {
-        background-color: #e0f2f1 !important;
-        cursor: crosshair;
-      }
-    `;
-    document.head.appendChild(style);
-  }
-
-  // --- COLOR UTILS ---
-  function rgbToHex(r, g, b) {
-    const to = (x) => x.toString(16).padStart(2, '0');
-    return `#${to(r)}${to(g)}${to(b)}`;
-  }
-
-  function parseColorToHex(color) {
-    if (!color) return null;
-    const c = String(color).trim().toLowerCase();
-    if (!c || c === 'none' || c === 'transparent') return null;
-
-    if (c.startsWith('#')) {
-      if (c.length === 4) return `#${c[1]}${c[1]}${c[2]}${c[2]}${c[3]}${c[3]}`;
-      return c.substring(0, 7);
-    }
-    if (c.startsWith('rgb')) {
-      const parts = c.match(/\d+/g);
-      if (parts && parts.length >= 3) return rgbToHex(Number(parts[0]), Number(parts[1]), Number(parts[2]));
-    }
-    return null;
-  }
-
-  function hexToRgb(hex) {
-    const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
-    return m ? { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) } : null;
-  }
-
-  function rgbToHsl(r, g, b) {
-    r /= 255; g /= 255; b /= 255;
-    const max = Math.max(r, g, b), min = Math.min(r, g, b);
-    let h = 0, s = 0, l = (max + min) / 2;
-    if (max !== min) {
-      const d = max - min;
-      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-      switch (max) {
-        case r: h = (g - b) / d + (g < b ? 6 : 0); break;
-        case g: h = (b - r) / d + 2; break;
-        case b: h = (r - g) / d + 4; break;
-      }
-      h *= 60;
-    }
-    return { h: h < 0 ? h + 360 : h, s, l };
-  }
-
-  // --- SORTING LOGIC ---
-  function getCategory(h, s, l) {
-    if (l > 0.90) return { order: 1, label: '⚪ Weiß / Hell' };
-    if (l < 0.1) return { order: 99, label: '⚫ Schwarz / Dunkel' };
-    if (s < 0.12) return { order: 90, label: '🌫️ Grau / Neutral' };
-    if (h >= 330 || h < 60) return { order: 10, label: '🟡🔴 Gelb & Rot' };
-    if (h >= 60 && h < 170) return { order: 20, label: '🟢 Grün & Türkis' };
-    return { order: 30, label: '🔵🟣 Blau & Violett' };
-  }
-
-  // --- CORE ANALYSIS ---
-
-  // Liest die ursprüngliche Palette aus dem DOM aus
-  function analyzeOriginalData() {
-    const rawPalette = [];
-    const tiles = $all('#palette .color');
-    
-    tiles.forEach(tile => {
-      const bg = parseColorToHex(tile.style.backgroundColor);
-      // WICHTIG: Wir holen die ID entweder aus dem Text (beim ersten Mal) oder aus dem Attribut (wenn wir es schon mal geändert haben)
-      let nr = tile.getAttribute('data-orig-id');
-      
-      if (!nr) {
-        nr = tile.innerText.trim();
-        if (nr !== '') {
-            tile.setAttribute('data-orig-id', nr); // ID festnageln
-        }
-      }
-
-      if (bg && nr !== '') {
-        if (!tile.hasAttribute('data-orig-bg')) {
-          tile.setAttribute('data-orig-bg', bg);
-        }
-        
-        rawPalette.push({
-          id: nr, // Das ist die "wahre" ID (0-15)
-          origHex: bg
-        });
-      }
-    });
-    return rawPalette;
-  }
-
-  function arePalettesEqual(oldPalette, newRawData) {
-    if (!oldPalette || oldPalette.length === 0) return false;
-    if (oldPalette.length !== newRawData.length) return false;
-
-    const oldMap = new Map();
-    oldPalette.forEach(p => oldMap.set(p.id, p.origHex));
-
-    for (const newItem of newRawData) {
-        if (!oldMap.has(newItem.id)) return false;
-        if (oldMap.get(newItem.id) !== newItem.origHex) return false;
-    }
-    return true;
-  }
-
-  function refreshStateFromDom() {
-    const newRawData = analyzeOriginalData();
-    const isSameImage = arePalettesEqual(STATE.palette, newRawData);
-
-    if (!isSameImage) {
-        STATE.mapping.clear();
-    }
-    STATE.palette = newRawData;
-    performResort();
-  }
-
-  function performResort() {
-    // Metriken aktualisieren
-    STATE.palette.forEach(item => {
-        const currentHex = STATE.mapping.get(item.origHex) || item.origHex;
-        const rgb = hexToRgb(currentHex) || {r:0,g:0,b:0};
-        const hsl = rgbToHsl(rgb.r, rgb.g, rgb.b);
-        const cat = getCategory(hsl.h, hsl.s, hsl.l);
-
-        item.groupOrder = cat.order;
-        item.groupLabel = cat.label;
-        item.light = hsl.l;
-    });
-
-    // Sortieren
-    STATE.palette.sort((a, b) => {
-      if (a.groupOrder !== b.groupOrder) return a.groupOrder - b.groupOrder;
-      return b.light - a.light;
-    });
-
-    // Mapping erstellen
-    STATE.indexMap.clear();
-    STATE.palette.forEach((item, idx) => {
-      const newNr = idx + 1;
-      STATE.indexMap.set(item.id, newNr);
-      item.newNr = newNr;
-    });
-
-    updateRuntimeInterface();
-    updateNativePalette();
-    updateSvgContent();
-  }
-
-  // --- HIGHLIGHTING ---
-  function toggleHighlight(originalId, originalHex, active) {
-    const svg = getSvg();
-    if (!svg) return;
-
-    // 1. Flächen highlighten (basierend auf Original-Farbe, da diese in data-orig-fill steht)
-    // Wir nutzen hier den Hex-Wert, da SVG paths oft keine ID haben, aber wir haben data-orig-fill gesetzt.
-    const paths = $all(`path[data-orig-fill="${originalHex}"]`, svg);
-    paths.forEach(p => {
-        if (active) p.classList.add('pbn-highlight-path');
-        else p.classList.remove('pbn-highlight-path');
-    });
-
-    // 2. Zahlen highlighten (basierend auf Original-ID 0-15)
-    const texts = $all(`text[data-orig-text="${originalId}"]`, svg);
-    texts.forEach(t => {
-        if (active) t.classList.add('pbn-highlight-text');
-        else t.classList.remove('pbn-highlight-text');
-    });
-  }
-
-  // --- UPDATE FUNCTIONS ---
-
-  function updateRuntimeInterface() {
-    const list = $('#pbnRecolorList');
-    if (!list) return;
-    
-    const scrollPos = list.scrollTop;
-    list.innerHTML = '';
-
-    let lastLabel = '';
-
-    STATE.palette.forEach(item => {
-      const currentHex = STATE.mapping.get(item.origHex) || item.origHex;
-
-      if (item.groupLabel !== lastLabel) {
-        const h = document.createElement('div');
-        h.style.cssText = 'padding:6px 0 2px 0;margin-top:5px;font-size:0.75rem;font-weight:bold;color:#666;border-bottom:1px solid #eee;';
-        h.textContent = item.groupLabel;
-        list.appendChild(h);
-        lastLabel = item.groupLabel;
-      }
-
-      const row = document.createElement('div');
-      row.className = 'pbn-row';
-      row.style.cssText = 'display:flex;gap:6px;align-items:center;margin-bottom:2px;padding:2px 0;border-radius:4px;transition:background 0.2s;';
-
-      // Mouse Events für Highlight
-      row.addEventListener('mouseenter', () => {
-          row.classList.add('pbn-row-hover');
-          toggleHighlight(item.id, item.origHex, true);
-      });
-      row.addEventListener('mouseleave', () => {
-          row.classList.remove('pbn-row-hover');
-          toggleHighlight(item.id, item.origHex, false);
-      });
-
-      // Nummer
-      const nr = document.createElement('div');
-      nr.textContent = `#${item.newNr}`;
-      nr.style.cssText = 'font-weight:bold;width:30px;text-align:right;font-size:12px;color:#333;pointer-events:none;';
-
-      // Input
-      const inp = document.createElement('input');
-      inp.type = 'text';
-      inp.value = currentHex;
-      inp.style.cssText = `
-        width:70px; height:24px; font-size:12px; border:1px solid #ccc; padding:0 4px; margin:0;
-        background-color: ${currentHex};
-        color: ${getContrastYIQ(currentHex)};
-        text-shadow: none;
-      `;
-      
-      inp.addEventListener('change', (e) => {
-        let val = e.target.value.trim();
-        if (/^[0-9a-f]{6}$/i.test(val)) val = '#' + val;
-        
-        const valid = parseColorToHex(val);
-        if (valid) {
-          STATE.mapping.set(item.origHex, valid);
-        } else {
-          STATE.mapping.delete(item.origHex);
-        }
-        
-        requestAnimationFrame(() => {
-            performResort();
-        });
-      });
-
-      row.append(nr, inp);
-      list.appendChild(row);
-    });
-
-    list.scrollTop = scrollPos;
-  }
-
-  function updateNativePalette() {
-    const container = $('#palette');
-    if (!container) return;
-
-    // Nur den visuellen Inhalt leeren, nicht die Logik zerstören
-    // Da wir aber analyzeOriginalData am Anfang machen, ist das hier okay für die Anzeige
-    container.innerHTML = '';
-
-    STATE.palette.forEach(item => {
-      const currentHex = STATE.mapping.get(item.origHex) || item.origHex;
-      
-      const div = document.createElement('div');
-      div.className = 'color tooltipped';
-      div.style.cssText = `
-        float: left; width: 40px; height: 40px; 
-        border: 1px solid #AAA; border-radius: 5px; 
-        text-align: center; padding: 5px; font-weight: 600; margin: 5px;
-        background-color: ${currentHex};
-        color: ${getContrastYIQ(currentHex)};
-        text-shadow: none;
-      `;
-      // Hier schreiben wir die NEUE Nummer rein
-      div.innerText = item.newNr;
-      div.setAttribute('data-tooltip', `Original ID: ${item.id} | Hex: ${currentHex}`);
-      
-      // Damit analyzeOriginalData beim nächsten Resize nicht verwirrt ist, schreiben wir die alte ID als Attribut rein
-      div.setAttribute('data-orig-id', item.id);
-      div.setAttribute('data-orig-bg', item.origHex);
-      
-      container.appendChild(div);
-    });
-    
-    if (window.M && M.Tooltip) M.Tooltip.init($all('.tooltipped'));
-  }
-
-  function updateSvgContent() {
-    const svg = getSvg();
-    if (!svg) return;
-
-    // 1. Fills aktualisieren
-    $all('path, polygon, rect, circle', svg).forEach(el => {
-        let hex = el.getAttribute('data-orig-fill');
-        if (!hex) {
-            // Beim ersten Lauf sichern
-            hex = parseColorToHex(el.getAttribute('fill') || el.style.fill);
-            if (hex) el.setAttribute('data-orig-fill', hex);
-        }
-
-        if (hex) {
-            const newHex = STATE.mapping.get(hex);
-            if (newHex) {
-                el.setAttribute('fill', newHex);
-                el.style.fill = newHex;
-            } else {
-                el.setAttribute('fill', hex);
-                el.style.fill = hex;
-            }
-        }
-    });
-
-    // 2. Labels (Nummern) aktualisieren
-    $all('text', svg).forEach(el => {
-        let originalId = el.getAttribute('data-orig-text');
-        
-        if (!originalId) {
-            // Versuchen, die ID aus dem Textinhalt zu retten, BEVOR wir ihn überschreiben
-            const textContent = el.textContent.trim();
-            if (/^\d+$/.test(textContent)) {
-                originalId = textContent;
-                el.setAttribute('data-orig-text', originalId);
-            } else {
-                return;
-            }
-        }
-
-        const newNr = STATE.indexMap.get(originalId);
-        if (newNr !== undefined) {
-            el.textContent = newNr;
-        }
-    });
-  }
-
-  // --- CUSTOM PNG GENERATOR ---
-  function hijackDownloadButton() {
-    const btn = $('#btnDownloadPalettePNG');
-    if (!btn) return;
-
-    const newBtn = btn.cloneNode(true);
-    btn.parentNode.replaceChild(newBtn, btn);
-
-    newBtn.addEventListener('click', (e) => {
-      e.preventDefault();
-      generateCustomPalettePng();
-    });
-  }
-
-  function generateCustomPalettePng() {
-    const canvas = document.createElement("canvas");
-    const items = STATE.palette; 
-
-    const nrOfItemsPerRow = 5; 
-    const nrRows = Math.ceil(items.length / nrOfItemsPerRow);
-    
-    const margin = 20;
-    const cellWidth = 150;
-    const cellHeight = 100;
-
-    canvas.width = margin + nrOfItemsPerRow * (cellWidth + margin);
-    canvas.height = margin + nrRows * (cellHeight + margin);
-    
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "white";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    ctx.font = "bold 24px Arial";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-
-    items.forEach((item, i) => {
-      const currentHex = STATE.mapping.get(item.origHex) || item.origHex;
-      
-      const col = i % nrOfItemsPerRow;
-      const row = Math.floor(i / nrOfItemsPerRow);
-
-      const x = margin + col * (cellWidth + margin);
-      const y = margin + row * (cellHeight + margin);
-
-      ctx.fillStyle = currentHex;
-      ctx.fillRect(x, y, cellWidth, cellHeight - 30);
-      
-      ctx.strokeStyle = "#444";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(x, y, cellWidth, cellHeight - 30);
-
-      ctx.fillStyle = getContrastYIQ(currentHex);
-      ctx.fillText(item.newNr, x + cellWidth / 2, y + (cellHeight - 30) / 2);
-
-      ctx.fillStyle = "black";
-      ctx.font = "14px Arial";
-      ctx.fillText(currentHex, x + cellWidth / 2, y + cellHeight - 10);
-      
-      ctx.font = "bold 24px Arial";
-    });
-
-    const link = document.createElement('a');
-    link.download = 'Mischpalette_Sortiert.png';
-    link.href = canvas.toDataURL();
-    link.click();
-  }
-
-  function getContrastYIQ(hexcolor){
-    hexcolor = hexcolor.replace("#", "");
-    var r = parseInt(hexcolor.substr(0,2),16);
-    var g = parseInt(hexcolor.substr(2,2),16);
-    var b = parseInt(hexcolor.substr(4,2),16);
-    var yiq = ((r*299)+(g*587)+(b*114))/1000;
-    return (yiq >= 128) ? 'black' : 'white';
-  }
-
-  // --- INIT ---
-  function ensurePanel() {
-    if ($('#pbnRecolorPanel')) return;
-    const anchor = $('#output-pane .row:last-child') || $('#output-pane');
-    if (!anchor) return;
-
-    const panel = document.createElement('div');
-    panel.id = 'pbnRecolorPanel';
-    panel.className = 'card-panel';
-    panel.style.cssText = 'margin-top:20px;padding:15px;background:#fafafa;border-left:5px solid #26a69a;';
-    
-    panel.innerHTML = `
-      <h5 style="margin-top:0;font-size:1.2rem;">🎨 Mischpalette & Farben</h5>
-      <p style="font-size:0.8rem;color:#666;">
-        Die Farben wurden automatisch nach Logik sortiert (Weiß -> Bunt -> Schwarz).<br>
-        Ändere die Farben hier. <b>Wichtig:</b> Die Nummern im Bild passen sich der neuen Sortierung an!
-        <br><i>Tipp: Fahre mit der Maus über eine Farbe, um sie im Bild zu finden.</i>
-      </p>
-      <div id="pbnRecolorList" style="max-height:400px;overflow-y:auto;padding-right:10px;"></div>
-    `;
-
-    anchor.parentElement.appendChild(panel);
-  }
-
-  function init() {
-    injectStyles();
-    
-    const container = $('#svgContainer');
-    if (container) {
-      const obs = new MutationObserver((mutations) => {
-        const hasSvg = mutations.some(m => Array.from(m.addedNodes).some(n => n.nodeName === 'svg'));
-        if (hasSvg) {
-          setTimeout(() => {
-            refreshStateFromDom(); 
-            hijackDownloadButton();
-          }, 500);
-        }
-      });
-      obs.observe(container, { childList: true });
-    }
-
-    ensurePanel();
-    
-    if (getSvg()) {
-        refreshStateFromDom();
-        hijackDownloadButton();
-    }
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
-    init();
-  }
-
-})();
---- END FILE: .\runtime-recolor.js ---
-
-
---- START FILE: .\runtime-target-size.js ---
-/*
- * PaintByNumbersGenerator – Runtime extension
- * Feature: Target SVG size (mm) for preview + laser exports.
- * Default: 800 x 600 mm
- *
- * FIX v1.1 (blank/white SVG prevention):
- *  - We DO NOT auto-create/override viewBox anymore.
- *    Some builds render an <svg> without viewBox initially; if we set viewBox
- *    too early (when contents are not yet inserted), we can lock it to 0 0 0 0
- *    which makes the preview + exports appear empty/white.
- *  - We only set width/height in mm. Rendering logic of the app remains intact.
- */
-
-(() => {
-  'use strict';
-
-  const DEFAULT_W = 800;
-  const DEFAULT_H = 600;
-  const LS_KEY = 'pbn_target_size_mm';
-
-  function clamp(n, min, max) {
-    n = Number(n);
-    if (!Number.isFinite(n)) return min;
-    return Math.min(max, Math.max(min, n));
-  }
-
-  function normalizeMm(v, fallback) {
-    const n = Number(v);
-    if (!Number.isFinite(n)) return fallback;
-    // Keep it sane: 10mm..5000mm
-    return clamp(n, 10, 5000);
-  }
-
-  function load() {
-    try {
-      const raw = localStorage.getItem(LS_KEY);
-      if (!raw) return { w: DEFAULT_W, h: DEFAULT_H };
-      const obj = JSON.parse(raw);
-      return {
-        w: normalizeMm(obj.w, DEFAULT_W),
-        h: normalizeMm(obj.h, DEFAULT_H),
-      };
-    } catch {
-      return { w: DEFAULT_W, h: DEFAULT_H };
-    }
-  }
-
-  function save(w, h) {
-    try {
-      localStorage.setItem(LS_KEY, JSON.stringify({ w, h }));
-    } catch {
-      /* ignore */
-    }
-  }
-
-  function ensureSettings() {
-    if (!window.__pbnRuntimeSettings) window.__pbnRuntimeSettings = {};
-    if (!window.__pbnRuntimeSettings.targetSizeMm) {
-      const { w, h } = load();
-      window.__pbnRuntimeSettings.targetSizeMm = { w, h };
-    }
-    return window.__pbnRuntimeSettings;
-  }
-
-  function getSvg() {
-    const container = document.querySelector('#svgContainer');
-    if (!container) return null;
-    return container.querySelector('svg');
-  }
-
-  function applySizeToSvg(svg, wMm, hMm) {
-    if (!svg) return;
-    // IMPORTANT: Only set physical size. Do NOT touch viewBox.
-    svg.setAttribute('width', `${wMm}mm`);
-    svg.setAttribute('height', `${hMm}mm`);
-  }
-
-  function scheduleApply() {
-    const settings = ensureSettings();
-    const svg = getSvg();
-    if (!svg) return;
-
-    // Apply after the current render tick to avoid racing with the app's renderer.
-    requestAnimationFrame(() => {
-      applySizeToSvg(getSvg(), settings.targetSizeMm.w, settings.targetSizeMm.h);
-    });
-  }
-
-  function injectUI() {
-    const settings = ensureSettings();
-
-    const mountCandidates = [
-      '#options', '#optionsPanel', '#controls', '#divOptions',
-      '.options', '.controls', '.sidebar', 'main', 'body'
-    ];
-    let mount = null;
-    for (const sel of mountCandidates) {
-      mount = document.querySelector(sel);
-      if (mount) break;
-    }
-    if (!mount) return;
-
-    // Avoid double injection
-    if (document.querySelector('#pbnTargetSizeFieldset')) return;
-
-    const fieldset = document.createElement('fieldset');
-    fieldset.id = 'pbnTargetSizeFieldset';
-    fieldset.style.cssText = 'margin:10px 0;padding:10px;border:1px solid #ccc;border-radius:6px;';
-
-    const legend = document.createElement('legend');
-    legend.textContent = 'Zielgröße (SVG)';
-    legend.style.cssText = 'padding:0 6px;font-weight:600;';
-
-    const row = document.createElement('div');
-    row.style.cssText = 'display:flex;gap:10px;align-items:center;flex-wrap:wrap;';
-
-    function mkNumber(label, id, value) {
-      const wrap = document.createElement('label');
-      wrap.style.cssText = 'display:flex;gap:6px;align-items:center;';
-      wrap.setAttribute('for', id);
-
-      const span = document.createElement('span');
-      span.textContent = label;
-
-      const input = document.createElement('input');
-      input.type = 'number';
-      input.id = id;
-      input.min = '10';
-      input.max = '5000';
-      input.step = '1';
-      input.value = String(value);
-      input.style.cssText = 'width:90px;';
-
-      const unit = document.createElement('span');
-      unit.textContent = 'mm';
-      unit.style.opacity = '0.7';
-
-      wrap.append(span, input, unit);
-      return { wrap, input };
-    }
-
-    const wCtrl = mkNumber('Breite', 'pbnTargetW', settings.targetSizeMm.w);
-    const hCtrl = mkNumber('Höhe', 'pbnTargetH', settings.targetSizeMm.h);
-
-    const hint = document.createElement('div');
-    hint.style.cssText = 'font-size:12px;opacity:0.75;margin-top:6px;';
-    hint.textContent = 'Wirkt auf preview.svg und laser.svg über width/height in mm. (viewBox bleibt unverändert.)';
-
-    function onChange() {
-      const w = normalizeMm(wCtrl.input.value, DEFAULT_W);
-      const h = normalizeMm(hCtrl.input.value, DEFAULT_H);
-      settings.targetSizeMm = { w, h };
-      save(w, h);
-      scheduleApply();
-    }
-
-    wCtrl.input.addEventListener('input', onChange);
-    hCtrl.input.addEventListener('input', onChange);
-
-    row.append(wCtrl.wrap, hCtrl.wrap);
-    fieldset.append(legend, row, hint);
-
-    // Insert near existing download buttons if possible
-    const dlBtn = document.querySelector('#btnDownloadSVG');
-    if (dlBtn && dlBtn.parentElement) {
-      dlBtn.parentElement.insertAdjacentElement('afterend', fieldset);
-    } else {
-      mount.appendChild(fieldset);
-    }
-
-    scheduleApply();
-  }
-
-  function observeSvgChanges() {
-    const container = document.querySelector('#svgContainer');
-    if (!container) return;
-
-    const obs = new MutationObserver(() => {
-      // Any new render: reapply size after tick
-      scheduleApply();
-    });
-
-    obs.observe(container, { childList: true, subtree: true });
-  }
-
-  // Public helper for laser-export.js (read-only)
-  window.__pbnGetTargetSizeMm = function __pbnGetTargetSizeMm() {
-    const settings = ensureSettings();
-    return { ...settings.targetSizeMm };
-  };
-
-  function init() {
-    injectUI();
-    observeSvgChanges();
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init, { once: true });
-  } else {
-    init();
-  }
-})();
-
---- END FILE: .\runtime-target-size.js ---
-
-
 --- START FILE: .\Start-PaintByNumbers.bat ---
 @echo off
 setlocal EnableExtensions
@@ -8069,7 +5279,6 @@ echo [INFO] Server stopped.
 popd
 endlocal
 pause
-
 --- END FILE: .\Start-PaintByNumbers.bat ---
 
 
@@ -12193,6 +9402,2753 @@ var requirejs,require,define;!function(global,setTimeout){function commentReplac
 })();
 
 --- END FILE: .\scripts\lib\saveSvgAsPng.js ---
+
+
+--- START FILE: .\scripts\upgrades\laser-export.js ---
+/*
+ * PaintByNumbersGenerator – Laser export runtime patch (v9.6 - Robust Zero Point)
+ *
+ * Features:
+ * - True Deduplication & Path Stitching
+ * - Travel Optimization (TSP)
+ * - Single-Line Fonts for Labels
+ * - Zero Point Selection (9 Points) - Respects ViewBox scaling!
+ */
+
+(function () {
+  "use strict";
+
+  var DEFAULT_STROKE_WIDTH = 0.35;
+  var FORCE_STROKE_COLOR = "#000";
+  var BATCH_SIZE = 50; 
+
+  // V8 Simplex Digits
+  var DIGITS = {
+    "0": { w: 7, s: [[[2,9], [1,8], [1,2], [2,1], [5,1], [6,2], [6,8], [5,9], [2,9]]] },
+    "1": { w: 5, s: [[[2,2], [3.5,1], [3.5,9]], [[2,9], [5,9]]] },
+    "2": { w: 7, s: [[[1,3], [2,1], [5,1], [6,2], [6,4], [1,9], [7,9]]] },
+    "3": { w: 7, s: [[[1,2], [2,1], [5,1], [6,2], [6,4], [4,5], [6,6], [6,8], [5,9], [2,9], [1,8]]] },
+    "4": { w: 7, s: [[[5,9], [5,1], [1,6], [7,6]]] }, 
+    "5": { w: 7, s: [[[6,1], [1.5,1], [1.5,4], [2,3.5], [5,3.5], [6,4.5], [6,8], [5,9], [2,9], [1,8]]] },
+    "6": { w: 7, s: [[[5,1], [2,1], [1,2], [1,8], [2,9], [5,9], [6,8], [6,6], [5,5], [1.5,5]]] },
+    "7": { w: 7, s: [[[1,1], [6,1], [3,9]]] },
+    "8": { w: 7, s: [[[2,1], [5,1], [6,2], [6,4], [5,5], [2,5], [1,6], [1,8], [2,9], [5,9], [6,8], [6,6], [5,5], [2,4], [1,2], [2,1]]] },
+    "9": { w: 7, s: [[[5.5,5], [2,5], [1,4], [1,2], [2,1], [5,1], [6,2], [6,8], [5,9], [2,9]]] },
+    " ": { w: 4, s: [] }
+  };
+
+  // --- UI: Zero Point Selector ---
+  var currentZeroPoint = "TL"; // Default Top-Left
+
+  function injectZeroPointUI() {
+      var target = document.getElementById('pbnTargetSizeFieldset');
+      var container;
+      
+      if (target) {
+          container = document.createElement('fieldset');
+          container.style.cssText = "margin:10px 0;padding:10px;border:1px solid #ccc;border-radius:6px;";
+          target.parentNode.insertBefore(container, target.nextSibling);
+      } else {
+          container = document.createElement('div');
+          container.className = "collection-item";
+          var opts = document.getElementById('options-pane');
+          if(opts) opts.appendChild(container);
+          else return;
+      }
+
+      container.innerHTML = `
+        <legend style="padding:0 6px;font-weight:600;">Laser Zero Point (Origin)</legend>
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; max-width: 180px; margin-top: 5px;">
+            <label><input name="zp" type="radio" value="TL" checked /> <span>TL</span></label>
+            <label><input name="zp" type="radio" value="TM" /> <span>TM</span></label>
+            <label><input name="zp" type="radio" value="TR" /> <span>TR</span></label>
+            <label><input name="zp" type="radio" value="ML" /> <span>ML</span></label>
+            <label><input name="zp" type="radio" value="MM" /> <span>MM</span></label>
+            <label><input name="zp" type="radio" value="MR" /> <span>MR</span></label>
+            <label><input name="zp" type="radio" value="BL" /> <span>BL</span></label>
+            <label><input name="zp" type="radio" value="BM" /> <span>BM</span></label>
+            <label><input name="zp" type="radio" value="BR" /> <span>BR</span></label>
+        </div>
+        <div style="font-size:12px;opacity:0.75;margin-top:6px;">
+            Coordinate system shift. <br>E.g. <b>MM</b> moves (0,0) to center.
+        </div>
+      `;
+
+      var radios = container.querySelectorAll('input[name="zp"]');
+      radios.forEach(function(r) {
+          r.addEventListener('change', function(e) {
+              currentZeroPoint = e.target.value;
+          });
+      });
+  }
+
+  function getTranslationOffset(width, height, zpMode) {
+      // Determines how much to shift the coordinates based on the LOGICAL width/height
+      var dx = 0;
+      var dy = 0;
+      
+      // Horizontal Logic
+      if (zpMode.endsWith("R")) dx = -width;
+      else if (zpMode.endsWith("M") && !zpMode.startsWith("M")) { /* TM or BM */ dx = -width / 2; }
+      else if (zpMode === "MM" || zpMode === "ML" || zpMode === "MR") { 
+         // Middle Row
+         if(zpMode === "MM") dx = -width / 2;
+         if(zpMode === "MR") dx = -width;
+      }
+      // Re-check middle column general case
+      if (zpMode === "TM" || zpMode === "BM") dx = -width / 2;
+
+
+      // Vertical Logic
+      if (zpMode.startsWith("B")) dy = -height;
+      else if (zpMode.startsWith("M")) dy = -height / 2;
+
+      return { x: dx, y: dy };
+  }
+
+  // --- Helpers ---
+  function downloadTextFile(filename, text) {
+    var preface = '<?xml version="1.0" standalone="no"?>\r\n';
+    var blob = new Blob([preface, text], { type: "image/svg+xml;charset=utf-8" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.style.display = 'none';
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+  }
+
+  function getCurrentSvgMarkup() {
+    var svg = document.querySelector("#svgContainer svg");
+    if (!svg) return null;
+    // Note: runtime-target-size.js handles width/height/viewBox on the live element.
+    // We just read what's there.
+    if(!svg.getAttribute("xmlns")) svg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    return svg.outerHTML;
+  }
+
+  function parseNumberAttr(el, name, fallback) {
+    var v = el.getAttribute(name);
+    if (v == null) return fallback;
+    var n = parseFloat(v);
+    return isFinite(n) ? n : fallback;
+  }
+
+  function getStrokeWidthFromUI() {
+    var el = document.getElementById('txtSingleLineStrokeWidth');
+    return el ? (parseFloat(el.value) || DEFAULT_STROKE_WIDTH) : DEFAULT_STROKE_WIDTH;
+  }
+
+  function strokeTextToPath(text, letterSpacing) {
+    var height = 10;
+    var x = 0;
+    var parts = [];
+    for (var i = 0; i < text.length; i++) {
+      var ch = text.charAt(i);
+      var g = DIGITS[ch];
+      if (!g) continue;
+      for (var si = 0; si < g.s.length; si++) {
+        var stroke = g.s[si];
+        if (!stroke || stroke.length < 2) continue;
+        parts.push(["M", x + stroke[0][0], stroke[0][1]]);
+        for (var pi = 1; pi < stroke.length; pi++) {
+          parts.push(["L", x + stroke[pi][0], stroke[pi][1]]);
+        }
+      }
+      x += g.w + letterSpacing;
+    }
+    var width = Math.max(0, x - letterSpacing);
+    return { segs: parts, width: width, height: height };
+  }
+
+  // --- Math ---
+  function matMul(a, b) {
+    return [
+      a[0]*b[0] + a[2]*b[1], a[1]*b[0] + a[3]*b[1],
+      a[0]*b[2] + a[2]*b[3], a[1]*b[2] + a[3]*b[3],
+      a[0]*b[4] + a[2]*b[5] + a[4], a[1]*b[4] + a[3]*b[5] + a[5]
+    ];
+  }
+  
+  function matApply(m, x, y) {
+    if (!m) return [x, y];
+    return [m[0]*x + m[2]*y + m[4], m[1]*x + m[3]*y + m[5]];
+  }
+
+  function matTranslate(tx, ty) { return [1,0,0,1,tx,ty]; }
+  function matScale(sx, sy) { return [sx,0,0,sy,0,0]; }
+
+  function parseTransformList(t) {
+    var m = [1,0,0,1,0,0];
+    if (!t) return m;
+    var re = /(translate|scale)\s*\(([^)]*)\)/ig;
+    var match;
+    while ((match = re.exec(t)) !== null) {
+      var fn = match[1].toLowerCase();
+      var args = match[2].trim().split(/[\s,]+/).filter(Boolean).map(parseFloat);
+      if (fn === "translate") {
+        m = matMul(m, matTranslate(args[0]||0, args[1]||0));
+      } else if (fn === "scale") {
+        m = matMul(m, matScale(args[0]||1, args[1]||args[0]||1));
+      }
+    }
+    return m;
+  }
+
+  function cumulativeTransformMatrix(el, stopAt) {
+    var mats = [];
+    var cur = el;
+    while (cur && cur !== stopAt && cur) {
+      if (cur.getAttribute) {
+        var t = cur.getAttribute('transform');
+        if (t) mats.push(parseTransformList(t));
+      }
+      cur = cur.parentNode;
+    }
+    var M = [1,0,0,1,0,0];
+    for (var i = mats.length - 1; i >= 0; i--) {
+      M = matMul(M, mats[i]);
+    }
+    return M;
+  }
+
+  // --- Optimization Engine ---
+
+  function flattenNestedSvg(doc) {
+    var root = doc.documentElement;
+    var allSvgs = Array.prototype.slice.call(root.getElementsByTagName("svg"));
+    if (allSvgs.length <= 1) return;
+
+    for (var i = allSvgs.length - 1; i >= 1; i--) {
+      var svg = allSvgs[i];
+      if (!svg || !svg.parentNode) continue;
+      if (svg === root) continue;
+
+      var x = parseNumberAttr(svg, "x", 0);
+      var y = parseNumberAttr(svg, "y", 0);
+      var w = parseNumberAttr(svg, "width", 0);
+      var h = parseNumberAttr(svg, "height", 0);
+      var vbAttr = svg.getAttribute("viewBox");
+      var vb = vbAttr ? vbAttr.trim().split(/[\s,]+/).map(parseFloat) : [];
+      
+      var vbMinX = (vb.length === 4) ? vb[0] : 0;
+      var vbMinY = (vb.length === 4) ? vb[1] : 0;
+      var vbW = (vb.length === 4) ? vb[2] : (w || 0);
+      var vbH = (vb.length === 4) ? vb[3] : (h || 0);
+      if (!w) w = vbW;
+      if (!h) h = vbH;
+
+      var scaleX = (vbW) ? (w / vbW) : 1;
+      var scaleY = (vbH) ? (h / vbH) : 1;
+      var s = Math.min(scaleX, scaleY); 
+      var dx = (w - vbW * s) / 2;
+      var dy = (h - vbH * s) / 2;
+
+      var existing = (svg.getAttribute("transform") || "").trim();
+      var tMap = "translate(" + x + "," + y + ") translate(" + dx + "," + dy + ") scale(" + s + ") translate(" + (-vbMinX) + "," + (-vbMinY) + ")";
+      if (existing) tMap = existing + " " + tMap;
+
+      var g = doc.createElementNS("http://www.w3.org/2000/svg", "g");
+      g.setAttribute("transform", tMap);
+
+      while (svg.firstChild) g.appendChild(svg.firstChild);
+      svg.parentNode.replaceChild(g, svg);
+    }
+  }
+
+  function convertTextNodesToLabelPaths(doc, strokeWidth) {
+    var svgEl = doc.documentElement;
+    var texts = Array.prototype.slice.call(svgEl.getElementsByTagName("text"));
+    for (var ti = 0; ti < texts.length; ti++) {
+      var t = texts[ti];
+      var label = (t.textContent || "").trim();
+      if (!label || !/^\d+$/.test(label)) continue;
+
+      var x = parseNumberAttr(t, "x", 0);
+      var y = parseNumberAttr(t, "y", 0);
+      var fontSize = parseNumberAttr(t, "font-size", 12);
+      
+      var letterSpacing = (label.length > 1) ? 1.0 : 1.5; 
+      var p = strokeTextToPath(label, letterSpacing);
+      var scale = fontSize / p.height;
+
+      var scaledW = p.width * scale;
+      var xOffset = (-scaledW/2); 
+      var yOffset = (-p.height * scale * 0.5);
+
+      var dparts = [];
+      for (var si = 0; si < p.segs.length; si++) {
+        var seg = p.segs[si];
+        var cmd = seg[0];
+        var px = (seg[1] * scale) + x + xOffset;
+        var py = (seg[2] * scale) + y + yOffset;
+        dparts.push(cmd + " " + px.toFixed(3) + " " + py.toFixed(3));
+      }
+
+      var path = doc.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", dparts.join(" "));
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke", FORCE_STROKE_COLOR);
+      path.setAttribute("stroke-width", String(strokeWidth));
+      path.setAttribute("data-label", "true"); 
+      
+      t.parentNode.replaceChild(path, t);
+    }
+  }
+
+  function bakePathData(d, matrix, offset) {
+      if (!d) return null;
+      var tokens = d.replace(/,/g, ' ').trim().split(/\s+/);
+      var idx = 0;
+      var out = [];
+      // Calculate BBox for sorting
+      var cx=0, cy=0;
+      var points = [];
+
+      function applyM(x, y) { 
+          var pt = matApply(matrix, x, y); 
+          // Apply Zero Point Offset here
+          return [pt[0] + offset.x, pt[1] + offset.y];
+      }
+
+      while (idx < tokens.length) {
+          var cmd = tokens[idx++];
+          if (cmd.toUpperCase() === 'M' || cmd.toUpperCase() === 'L') {
+              var nx = parseFloat(tokens[idx++]);
+              var ny = parseFloat(tokens[idx++]);
+              var pt = applyM(nx, ny);
+              out.push(cmd.toUpperCase() + ' ' + pt[0].toFixed(3) + ' ' + pt[1].toFixed(3));
+              points.push(pt);
+          } else if (cmd.toUpperCase() === 'Q') {
+              var c1x = parseFloat(tokens[idx++]);
+              var c1y = parseFloat(tokens[idx++]);
+              var nx = parseFloat(tokens[idx++]);
+              var ny = parseFloat(tokens[idx++]);
+              var cp = applyM(c1x, c1y);
+              var pt = applyM(nx, ny);
+              out.push('Q ' + cp[0].toFixed(3) + ' ' + cp[1].toFixed(3) + ' ' + pt[0].toFixed(3) + ' ' + pt[1].toFixed(3));
+              points.push(pt);
+          } else if (cmd.toUpperCase() === 'Z') {
+              out.push('Z');
+          }
+      }
+      
+      var midX = 0, midY = 0;
+      if (points.length > 0) {
+          points.forEach(p => { midX += p[0]; midY += p[1]; });
+          midX /= points.length;
+          midY /= points.length;
+      }
+
+      return { d: out.join(' '), center: {x: midX, y: midY} };
+  }
+
+  function getSegmentHash(p1, p2, cp) {
+     var x1 = p1[0].toFixed(2), y1 = p1[1].toFixed(2);
+     var x2 = p2[0].toFixed(2), y2 = p2[1].toFixed(2);
+     var s1 = x1 + ',' + y1;
+     var s2 = x2 + ',' + y2;
+     var sc = cp ? '|' + cp[0].toFixed(2) + ',' + cp[1].toFixed(2) : '';
+     return (s1 < s2) ? (s1 + '-' + s2 + sc) : (s2 + '-' + s1 + sc);
+  }
+
+  function parseAndDecomposeBorders(d, matrix, offset) {
+      var tokens = d.replace(/,/g, ' ').trim().split(/\s+/);
+      var idx = 0;
+      var cx = 0, cy = 0;
+      var sx = 0, sy = 0;
+      var edges = [];
+
+      function applyM(x, y) { 
+          var pt = matApply(matrix, x, y); 
+          return [pt[0] + offset.x, pt[1] + offset.y];
+      }
+
+      while (idx < tokens.length) {
+          var cmd = tokens[idx++];
+          if (cmd.toUpperCase() === 'M') {
+              var pt = applyM(parseFloat(tokens[idx++]), parseFloat(tokens[idx++]));
+              cx = pt[0]; cy = pt[1];
+              sx = cx; sy = cy;
+          } else if (cmd.toUpperCase() === 'L') {
+              var pt = applyM(parseFloat(tokens[idx++]), parseFloat(tokens[idx++]));
+              edges.push({ type:'L', p1:[cx,cy], p2:[pt[0],pt[1]] });
+              cx = pt[0]; cy = pt[1];
+          } else if (cmd.toUpperCase() === 'Q') {
+              var cp = applyM(parseFloat(tokens[idx++]), parseFloat(tokens[idx++]));
+              var pt = applyM(parseFloat(tokens[idx++]), parseFloat(tokens[idx++]));
+              edges.push({ type:'Q', p1:[cx,cy], p2:[pt[0],pt[1]], c:[cp[0],cp[1]] });
+              cx = pt[0]; cy = pt[1];
+          } else if (cmd.toUpperCase() === 'Z') {
+              if (Math.abs(cx-sx)>0.01 || Math.abs(cy-sy)>0.01) {
+                  edges.push({ type:'L', p1:[cx,cy], p2:[sx,sy] });
+              }
+              cx = sx; cy = sy;
+          }
+      }
+      return edges;
+  }
+
+  // --- Advanced Optimizers ---
+  function stitchEdges(edges) {
+      var adj = {};
+      function k(pt) { return pt[0].toFixed(2) + ',' + pt[1].toFixed(2); }
+      function addToAdj(key, edge) {
+          if (!adj[key]) adj[key] = [];
+          adj[key].push(edge);
+      }
+      edges.forEach(e => {
+          e.visited = false;
+          addToAdj(k(e.p1), e);
+          addToAdj(k(e.p2), e);
+      });
+      var chains = [];
+      for (var i = 0; i < edges.length; i++) {
+          var startEdge = edges[i];
+          if (startEdge.visited) continue;
+          var chain = [];
+          var current = startEdge;
+          var headPoint = current.p1; 
+          var tailPoint = current.p2;
+          current.visited = true;
+          chain.push({ edge: current, reverse: false });
+          var growing = true;
+          while (growing) {
+              var candidates = adj[k(tailPoint)];
+              var foundNext = false;
+              if (candidates) {
+                  for (var c = 0; c < candidates.length; c++) {
+                      var cand = candidates[c];
+                      if (!cand.visited) {
+                          cand.visited = true;
+                          var distToP1 = Math.abs(cand.p1[0] - tailPoint[0]) + Math.abs(cand.p1[1] - tailPoint[1]);
+                          var isNaturalDir = (distToP1 < 0.1); 
+                          chain.push({ edge: cand, reverse: !isNaturalDir });
+                          tailPoint = isNaturalDir ? cand.p2 : cand.p1;
+                          foundNext = true;
+                          break; 
+                      }
+                  }
+              }
+              if (!foundNext) growing = false;
+          }
+          growing = true;
+          while (growing) {
+              var candidates = adj[k(headPoint)];
+              var foundPrev = false;
+              if (candidates) {
+                  for (var c = 0; c < candidates.length; c++) {
+                      var cand = candidates[c];
+                      if (!cand.visited) {
+                          cand.visited = true;
+                          var distToP2 = Math.abs(cand.p2[0] - headPoint[0]) + Math.abs(cand.p2[1] - headPoint[1]);
+                          var isNaturalDir = (distToP2 < 0.1);
+                          chain.unshift({ edge: cand, reverse: !isNaturalDir });
+                          headPoint = isNaturalDir ? cand.p1 : cand.p2;
+                          foundPrev = true;
+                          break;
+                      }
+                  }
+              }
+              if (!foundPrev) growing = false;
+          }
+          chains.push({ segments: chain, startPt: headPoint, endPt: tailPoint });
+      }
+      return chains;
+  }
+
+  function sortChains(chains) {
+      if (chains.length === 0) return [];
+      var sorted = [];
+      var currentPos = [0, 0]; 
+      var unvisited = new Set(chains);
+      var count = 0;
+      var limit = chains.length + 1;
+      while (unvisited.size > 0 && count < limit) {
+          count++;
+          var nearest = null;
+          var minDist = Infinity;
+          var reversed = false;
+          for (var chain of unvisited) {
+              var dStart = Math.abs(chain.startPt[0] - currentPos[0]) + Math.abs(chain.startPt[1] - currentPos[1]);
+              if (dStart < minDist) {
+                  minDist = dStart;
+                  nearest = chain;
+                  reversed = false; 
+              }
+              var dEnd = Math.abs(chain.endPt[0] - currentPos[0]) + Math.abs(chain.endPt[1] - currentPos[1]);
+              if (dEnd < minDist) {
+                  minDist = dEnd;
+                  nearest = chain;
+                  reversed = true; 
+              }
+          }
+          if (nearest) {
+              unvisited.delete(nearest);
+              nearest.renderReverse = reversed; 
+              sorted.push(nearest);
+              currentPos = reversed ? nearest.startPt : nearest.endPt;
+          } else {
+              break; 
+          }
+      }
+      return sorted;
+  }
+  
+  function sortLabels(labels) {
+      if (labels.length === 0) return [];
+      var sorted = [];
+      var currentPos = [0, 0];
+      var unvisited = new Set(labels);
+      var count = 0;
+      while (unvisited.size > 0 && count++ < labels.length + 1) {
+          var nearest = null;
+          var minDist = Infinity;
+          for (var l of unvisited) {
+              var d = Math.abs(l.center.x - currentPos[0]) + Math.abs(l.center.y - currentPos[1]);
+              if (d < minDist) {
+                  minDist = d;
+                  nearest = l;
+              }
+          }
+          if(nearest) {
+              unvisited.delete(nearest);
+              sorted.push(nearest);
+              currentPos = [nearest.center.x, nearest.center.y];
+          } else break;
+      }
+      return sorted;
+  }
+
+  function optimizeGeometry(svgString) {
+      console.log("Parsing SVG...");
+      var parser = new DOMParser();
+      var doc = parser.parseFromString(svgString, 'image/svg+xml');
+      
+      flattenNestedSvg(doc);
+      convertTextNodesToLabelPaths(doc, getStrokeWidthFromUI());
+      
+      // Determine Dimensions for Zero Point Calculation
+      var root = doc.documentElement;
+      var width = 0;
+      var height = 0;
+      
+      // Try to get LOGICAL dimensions from viewBox (because runtime-target-size sets width/height to mm string)
+      var vbAttr = root.getAttribute("viewBox");
+      if (vbAttr) {
+          var vbParts = vbAttr.split(/\s+|,/).map(parseFloat);
+          if(vbParts.length === 4) {
+              // x, y, w, h
+              width = vbParts[2];
+              height = vbParts[3];
+          }
+      }
+      // Fallback if viewBox not present (rare with the new fix)
+      if (width === 0 || height === 0) {
+          width = parseFloat(root.getAttribute("width")) || 0;
+          height = parseFloat(root.getAttribute("height")) || 0;
+      }
+      
+      console.log("Logical Dimensions for Zero Point:", width, height);
+
+      // Calculate Zero Point Offset
+      var offset = getTranslationOffset(width, height, currentZeroPoint);
+      console.log("Applying Offset: ", offset);
+
+      var labels = [];
+      var borderEdges = [];
+      var uniqueEdgeHashes = new Set();
+      var dedupCount = 0;
+
+      var elements = Array.from(doc.querySelectorAll('path, rect, circle, polygon, polyline'));
+
+      elements.forEach(function(el) {
+          var isLabel = el.getAttribute('data-label') === 'true';
+          var hasFill = (el.getAttribute('fill') && el.getAttribute('fill') !== 'none');
+          var hasStroke = (el.getAttribute('stroke') && el.getAttribute('stroke') !== 'none');
+          
+          var M = cumulativeTransformMatrix(el, doc.documentElement);
+          var d = el.getAttribute('d');
+          
+          if (el.tagName === 'rect' && !d) {
+             var x=parseFloat(el.getAttribute('x')||0), y=parseFloat(el.getAttribute('y')||0), w=parseFloat(el.getAttribute('width')||0), h=parseFloat(el.getAttribute('height')||0);
+             d = `M ${x} ${y} L ${x+w} ${y} L ${x+w} ${y+h} L ${x} ${y+h} Z`;
+          }
+
+          if (!d) return;
+
+          if (isLabel) {
+             var baked = bakePathData(d, M, offset);
+             if (baked) labels.push(baked);
+          } 
+          else if (hasFill || hasStroke) {
+             var segs = parseAndDecomposeBorders(d, M, offset);
+             segs.forEach(function(s) {
+                 var h = getSegmentHash(s.p1, s.p2, s.c);
+                 if (!uniqueEdgeHashes.has(h)) {
+                     uniqueEdgeHashes.add(h);
+                     borderEdges.push(s);
+                 } else {
+                     dedupCount++;
+                 }
+             });
+          }
+      });
+      
+      console.log("Edges: " + borderEdges.length + " (Removed duplicates: " + dedupCount + ")");
+      console.log("Stitching chains...");
+      var rawChains = stitchEdges(borderEdges);
+      console.log("Created " + rawChains.length + " continuous paths.");
+      
+      console.log("Optimizing Border Travel (TSP)...");
+      var sortedChains = sortChains(rawChains);
+      
+      console.log("Optimizing Label Travel (TSP)...");
+      var sortedLabels = sortLabels(labels);
+
+      console.log("Generating Output...");
+      var newSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      
+      // Pass through the physical dimensions for the laser file
+      var wStr = root.getAttribute("width") || "100%";
+      var hStr = root.getAttribute("height") || "100%";
+      
+      // Calculate new viewBox based on offset
+      // If original was 0 0 2000 2000, and we shift center (-1000, -1000)
+      // New content is at -1000..1000. 
+      // ViewBox should arguably match the content bounds if we want it viewable in browser,
+      // OR we stick to the logical 0,0 top left.
+      // LaserGRBL usually ignores viewBox and looks at coordinate values.
+      // Inkscape likes a correct viewBox. 
+      // Let's shift viewBox origin to match the offset.
+      var vbX = 0 + offset.x;
+      var vbY = 0 + offset.y;
+      var rootVB = `${vbX} ${vbY} ${width} ${height}`;
+
+      newSvg.setAttribute("width", wStr);
+      newSvg.setAttribute("height", hStr);
+      newSvg.setAttribute("viewBox", rootVB);
+      newSvg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+
+      var gBorders = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      gBorders.setAttribute("id", "laser-borders");
+      gBorders.setAttribute("stroke", FORCE_STROKE_COLOR);
+      gBorders.setAttribute("fill", "none");
+      gBorders.setAttribute("stroke-width", "0.2");
+      
+      var currentD = "";
+      var counter = 0;
+      var flushLimit = BATCH_SIZE;
+      
+      function flush(group, dVal) {
+          if (!dVal) return;
+          var p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+          p.setAttribute("d", dVal);
+          group.appendChild(p);
+      }
+      
+      sortedChains.forEach(chain => {
+          var segsToRender = chain.segments;
+          if (chain.renderReverse) {
+              segsToRender = [];
+              for(var i = chain.segments.length-1; i>=0; i--) {
+                  var item = chain.segments[i];
+                  segsToRender.push({ edge: item.edge, reverse: !item.reverse });
+              }
+          }
+          var start = segsToRender[0].reverse ? segsToRender[0].edge.p2 : segsToRender[0].edge.p1;
+          currentD += `M ${start[0].toFixed(3)} ${start[1].toFixed(3)} `;
+          segsToRender.forEach(item => {
+              var s = item.edge;
+              var target = item.reverse ? s.p1 : s.p2; 
+              if(s.type === 'L') {
+                   currentD += `L ${target[0].toFixed(3)} ${target[1].toFixed(3)} `;
+              } else {
+                   currentD += `Q ${s.c[0].toFixed(3)} ${s.c[1].toFixed(3)} ${target[0].toFixed(3)} ${target[1].toFixed(3)} `;
+              }
+          });
+          if (++counter >= flushLimit) {
+              flush(gBorders, currentD);
+              currentD = "";
+              counter = 0;
+          }
+      });
+      flush(gBorders, currentD);
+      newSvg.appendChild(gBorders);
+
+      var gLabels = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      gLabels.setAttribute("id", "laser-labels");
+      gLabels.setAttribute("stroke", FORCE_STROKE_COLOR);
+      gLabels.setAttribute("fill", "none");
+      gLabels.setAttribute("stroke-width", String(getStrokeWidthFromUI()));
+      
+      currentD = "";
+      counter = 0;
+      sortedLabels.forEach(lp => {
+          currentD += lp.d + " ";
+          if (++counter >= flushLimit) {
+              flush(gLabels, currentD);
+              currentD = "";
+              counter = 0;
+          }
+      });
+      flush(gLabels, currentD);
+      newSvg.appendChild(gLabels);
+      
+      console.log("Done.");
+      return new XMLSerializer().serializeToString(newSvg);
+  }
+
+  // --- UI Injection ---
+  function ensureButtons() {
+    var oldBtn = document.getElementById('btnDownloadSVG');
+    if (!oldBtn) return;
+    if (oldBtn.getAttribute('data-pbn-patched') === 'true') return;
+
+    var newPreviewBtn = oldBtn.cloneNode(true);
+    oldBtn.parentNode.replaceChild(newPreviewBtn, oldBtn);
+    
+    newPreviewBtn.id = 'btnDownloadSVG'; 
+    newPreviewBtn.textContent = 'Download SVG (Preview)';
+    newPreviewBtn.setAttribute('data-pbn-patched', 'true');
+
+    newPreviewBtn.addEventListener('click', function(ev) {
+        ev.preventDefault();
+        try {
+            var svg = getCurrentSvgMarkup();
+            if (svg) downloadTextFile('preview.svg', svg);
+        } catch(e) { console.error(e); }
+    });
+
+    var laserBtnId = 'btnDownloadSVGLaser';
+    var oldLaserBtn = document.getElementById(laserBtnId);
+    if (oldLaserBtn) oldLaserBtn.parentNode.removeChild(oldLaserBtn); 
+
+    var laserBtn = document.createElement('a');
+    laserBtn.id = laserBtnId;
+    laserBtn.className = newPreviewBtn.className;
+    laserBtn.style.marginLeft = '0px';
+    laserBtn.textContent = 'Download Laser SVG (Optimized)';
+    
+    newPreviewBtn.parentNode.insertBefore(laserBtn, newPreviewBtn.nextSibling);
+
+    laserBtn.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      try {
+        var svg = getCurrentSvgMarkup();
+        if (!svg) { alert("No image available."); return; }
+        
+        laserBtn.textContent = "Optimizing...";
+        setTimeout(function() {
+            var laserSvg = optimizeGeometry(svg);
+            downloadTextFile('laser_optimized.svg', laserSvg);
+            laserBtn.textContent = 'Download Laser SVG (Optimized)';
+        }, 50);
+        
+      } catch(e) {
+          console.error(e);
+          alert("Error: " + e.message);
+      }
+    });
+  }
+
+  function ensureStrokeWidthInput() {
+    if (document.getElementById('txtSingleLineStrokeWidth')) return;
+    var anchor = document.getElementById('btnDownloadSVGLaser');
+    if (!anchor) return;
+
+    var wrapper = document.createElement('span');
+    wrapper.style.marginLeft = '12px';
+    wrapper.style.display = 'inline-flex';
+    wrapper.style.alignItems = 'center';
+    wrapper.style.gap = '6px';
+    wrapper.innerHTML = `<span style="font-size:12px;">Label Stroke:</span>`;
+    
+    var input = document.createElement('input');
+    input.id = 'txtSingleLineStrokeWidth';
+    input.type = 'number';
+    input.min = '0.1';
+    input.step = '0.05';
+    input.value = String(DEFAULT_STROKE_WIDTH);
+    input.style.width = '60px';
+    input.style.height = '30px';
+    input.style.margin = '0';
+    wrapper.appendChild(input);
+    anchor.parentNode.insertBefore(wrapper, anchor.nextSibling);
+  }
+
+  // --- INIT ---
+  var _initDone = false;
+  function init() {
+     if(_initDone) return;
+     setTimeout(function(){
+         ensureButtons();
+         ensureStrokeWidthInput();
+         injectZeroPointUI(); // New Feature
+         _initDone = true;
+     }, 1000);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+  
+  var obs = new MutationObserver(function(mutations) {
+      var needsRebind = false;
+      for(var i=0; i<mutations.length; i++) {
+          if(mutations[i].target.id === 'output-pane' || mutations[i].target.id === 'options-pane') {
+              needsRebind = true;
+              break;
+          }
+      }
+      if(needsRebind) {
+          setTimeout(function() {
+             ensureButtons();
+             ensureStrokeWidthInput();
+             if(!document.getElementById('pbnTargetSizeFieldset') && !document.querySelector('input[name="zp"]')) {
+                 injectZeroPointUI();
+             }
+          }, 200);
+      }
+  });
+  
+  setTimeout(function() {
+      var target = document.getElementById('options-pane') || document.body;
+      obs.observe(target, { childList: true, subtree: true });
+  }, 1500);
+
+})();
+--- END FILE: .\scripts\upgrades\laser-export.js ---
+
+
+--- START FILE: .\scripts\upgrades\pdf-export.js ---
+/*
+ * PaintByNumbersGenerator – Runtime PDF Mixing Guide v2.3 (Unified Sorting)
+ * 
+ * Updates:
+ * - Table 1 (Summary) is now sorted by Pigment Families (same as Mixing Guide).
+ * - Added 'RGB' and 'Area' columns to Table 1 (matching your screenshot).
+ * - Included Group Headers in Table 1 for better overview.
+ */
+
+(() => {
+    'use strict';
+
+    // --- CONFIGURATION ---
+    const CONFIG = {
+        ML_PER_CM2: 0.05, 
+        WHITE_RATIO_CYAN: 0.25,
+        WHITE_RATIO_MAGENTA: 0.25,
+        WHITE_RATIO_YELLOW: 0.5,
+        WHITE_RATIO_BLACK: 0.93 
+    };
+
+    // --- HELPER: RGB to CMYK+W ---
+    function rgbToCmykW(r, g, b) {
+        let r_n = r / 255;
+        let g_n = g / 255;
+        let b_n = b / 255;
+
+        let k = 1 - Math.max(r_n, g_n, b_n);
+        let c = (1 - r_n - k) / (1 - k) || 0;
+        let m = (1 - g_n - k) / (1 - k) || 0;
+        let y = (1 - b_n - k) / (1 - k) || 0;
+
+        let w = Math.max(r_n, g_n, b_n) - (1 - k) * Math.max(c, m, y);
+        w = Math.max(0, Math.min(1, w));
+
+        return { c, m, y, k, w };
+    }
+
+    function calculateBaseRatios(rgb) {
+        let { c, m, y, k, w } = rgbToCmykW(rgb[0], rgb[1], rgb[2]);
+
+        if (c > 0 && m < 0.01 && y < 0.01 && k < 0.01) {
+            let new_c = c * CONFIG.WHITE_RATIO_CYAN;
+            w = w + c * (1 - CONFIG.WHITE_RATIO_CYAN);
+            c = new_c;
+        }
+        k = k * (1 - CONFIG.WHITE_RATIO_BLACK); 
+        
+        let sum = c + m + y + k + w;
+        if (sum > 0) {
+            return { c: c/sum, m: m/sum, y: y/sum, k: k/sum, w: w/sum };
+        }
+        return { c:0, m:0, y:0, k:0, w:1 };
+    }
+
+    // --- COLOR GROUPING (Pigment Pairs) ---
+    function rgbToHsl(r, g, b) {
+        r /= 255; g /= 255; b /= 255;
+        var max = Math.max(r, g, b), min = Math.min(r, g, b);
+        var h, s, l = (max + min) / 2;
+        if (max == min) { h = s = 0; } 
+        else {
+            var d = max - min;
+            s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+            switch (max) {
+                case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+                case g: h = (b - r) / d + 2; break;
+                case b: h = (r - g) / d + 4; break;
+            }
+            h /= 6;
+        }
+        return { h: h * 360, s, l };
+    }
+
+    function getColorGroup(rgb) {
+        const hsl = rgbToHsl(rgb[0], rgb[1], rgb[2]);
+        if (hsl.s < 0.12) {
+            return { name: "Black / White / Grayscale", id: 0 };
+        }
+
+        let r_n = rgb[0] / 255;
+        let g_n = rgb[1] / 255;
+        let b_n = rgb[2] / 255;
+        let k = 1 - Math.max(r_n, g_n, b_n);
+        let c = (1 - r_n - k) / (1 - k) || 0;
+        let m = (1 - g_n - k) / (1 - k) || 0;
+        let y = (1 - b_n - k) / (1 - k) || 0;
+
+        const scoreCY = c + y; 
+        const scoreCM = c + m; 
+        const scoreYM = y + m; 
+
+        if (scoreCY >= scoreCM && scoreCY >= scoreYM) {
+            return { name: "Cyan + Yellow (Greens)", id: 10 };
+        }
+        if (scoreCM >= scoreCY && scoreCM >= scoreYM) {
+            return { name: "Cyan + Magenta (Blues/Purples)", id: 20 };
+        }
+        
+        return { name: "Yellow + Magenta (Reds/Oranges)", id: 30 };
+    }
+
+    // --- MAIN PDF GENERATION ---
+    async function generatePDF() {
+        try {
+            if (!window.jspdf || !window.jspdf.jsPDF) {
+                alert("Error: jsPDF library not found!");
+                return;
+            }
+
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF();
+
+            // 1. Gather Data
+            const targetSize = (window.__pbnGetTargetSizeMm && window.__pbnGetTargetSizeMm()) || { w: 800, h: 600 };
+            const totalAreaCm2 = (targetSize.w / 10) * (targetSize.h / 10);
+            
+            const canvas = document.getElementById('cReduction');
+            if(!canvas) { alert("Please process image first."); return; }
+            
+            const ctx = canvas.getContext('2d');
+            const pixelData = ctx.getImageData(0,0, canvas.width, canvas.height).data;
+            const colorCounts = {}; 
+            let totalPixels = 0;
+            
+            for(let i=0; i<pixelData.length; i+=4) {
+                if(pixelData[i+3] < 128) continue;
+                const key = `${pixelData[i]},${pixelData[i+1]},${pixelData[i+2]}`;
+                colorCounts[key] = (colorCounts[key] || 0) + 1;
+                totalPixels++;
+            }
+
+            const paletteItems = Array.from(document.querySelectorAll('#palette .color'));
+            const paletteData = [];
+
+            paletteItems.forEach(item => {
+                const id = parseInt(item.innerText);
+                let bgStr = item.getAttribute('data-orig-bg') || item.style.backgroundColor;
+                let r=0,g=0,b=0;
+                
+                if(bgStr.startsWith('#')) {
+                    r = parseInt(bgStr.substring(1,3), 16);
+                    g = parseInt(bgStr.substring(3,5), 16);
+                    b = parseInt(bgStr.substring(5,7), 16);
+                } else {
+                    const parts = bgStr.match(/\d+/g);
+                    if(parts) { r=+parts[0]; g=+parts[1]; b=+parts[2]; }
+                }
+
+                const key = `${r},${g},${b}`;
+                const count = colorCounts[key] || 0;
+                const ratio = count > 0 ? (count / totalPixels) : (1 / (paletteItems.length || 1));
+                const grams = Math.max(0.5, (totalAreaCm2 * ratio) * CONFIG.ML_PER_CM2);
+                
+                const group = getColorGroup([r,g,b]);
+                const hsl = rgbToHsl(r,g,b);
+
+                // Calculate absolute component weights for table
+                const ratios = calculateBaseRatios([r,g,b]);
+                const absC = ratios.c * grams;
+                const absM = ratios.m * grams;
+                const absY = ratios.y * grams;
+                const absK = ratios.k * grams;
+                const absW = ratios.w * grams;
+
+                paletteData.push({
+                    id: id,
+                    rgb: [r,g,b],
+                    grams: grams,
+                    area: totalAreaCm2 * ratio,
+                    ratios: ratios,
+                    components: { c: absC, m: absM, y: absY, k: absK, w: absW },
+                    group: group,
+                    lightness: hsl.l
+                });
+            });
+
+            // 2. Sort: Group ID first, then Lightness High->Low
+            paletteData.sort((a,b) => {
+                if (a.group.id !== b.group.id) return a.group.id - b.group.id;
+                return b.lightness - a.lightness; 
+            });
+
+            // --- PAGE 1: DETAILED LIST (Sorted by Group) ---
+            doc.setFontSize(18);
+            doc.text("Material Report & Palette", 14, 20);
+            doc.setFontSize(10);
+            doc.text(`Target: ${targetSize.w}mm x ${targetSize.h}mm | Area: ${totalAreaCm2.toFixed(0)} cm²`, 14, 28);
+            
+            // Prepare Table 1 Data
+            let table1Body = [];
+            let lastGroupId1 = -1;
+
+            paletteData.forEach(p => {
+                if(p.group.id !== lastGroupId1) {
+                    table1Body.push([{content: p.group.name, colSpan: 10, styles: {fillColor: [220, 220, 220], fontStyle: 'bold', textColor: 0}}]);
+                    lastGroupId1 = p.group.id;
+                }
+                
+                table1Body.push([
+                    p.id,
+                    `${p.rgb[0]},${p.rgb[1]},${p.rgb[2]}`,
+                    "", // Color Box
+                    p.area.toFixed(1),
+                    p.grams.toFixed(2),
+                    p.components.c > 0.01 ? p.components.c.toFixed(2) : "-",
+                    p.components.m > 0.01 ? p.components.m.toFixed(2) : "-",
+                    p.components.y > 0.01 ? p.components.y.toFixed(2) : "-",
+                    p.components.k > 0.01 ? p.components.k.toFixed(2) : "-",
+                    p.components.w > 0.01 ? p.components.w.toFixed(2) : "-"
+                ]);
+            });
+
+            doc.autoTable({
+                startY: 35,
+                head: [['ID', 'RGB', 'Ref', 'Area cm²', 'Total g', 'C', 'M', 'Y', 'K', 'W']],
+                body: table1Body,
+                theme: 'grid',
+                styles: { fontSize: 8, cellPadding: 2 },
+                columnStyles: {
+                    0: { fontStyle: 'bold', halign: 'center' },
+                    1: { fontSize: 7, textColor: 100 },
+                    2: { cellWidth: 12 },
+                    3: { halign: 'right' },
+                    4: { fontStyle: 'bold', halign: 'right' },
+                    5: { halign: 'right', textColor: [0, 150, 150] },
+                    6: { halign: 'right', textColor: [150, 0, 150] },
+                    7: { halign: 'right', textColor: [150, 150, 0] },
+                    8: { halign: 'right' },
+                    9: { halign: 'right', textColor: 100 }
+                },
+                didDrawCell: (data) => {
+                    if (data.section === 'body' && data.column.index === 2) {
+                        // Locate original color (Need to account for header rows being in the data array but not in paletteData directly)
+                        // We map via ID in column 0
+                        const id = data.row.raw[0];
+                        // If it's a header row, raw[0] is an object, not an ID
+                        if (typeof id === 'number') {
+                            const color = paletteData.find(x => x.id === id);
+                            if(color) {
+                                const dim = data.cell.height - 4;
+                                doc.setFillColor(color.rgb[0], color.rgb[1], color.rgb[2]);
+                                doc.rect(data.cell.x + 2, data.cell.y + 2, dim, dim, 'F');
+                                doc.setDrawColor(0);
+                                doc.rect(data.cell.x + 2, data.cell.y + 2, dim, dim, 'S');
+                            }
+                        }
+                    }
+                }
+            });
+
+            // --- PAGE 2+: MIXING INSTRUCTIONS ---
+            doc.addPage();
+            doc.setFontSize(18);
+            doc.text("Cumulative Mixing Guide", 14, 20);
+            doc.setFontSize(10);
+            doc.text("Work flow: Mix the lightest color (Start Pot), use it, then darken the remainder.", 14, 28);
+
+            let currentGroupId = -1;
+            let currentGroupItems = [];
+            let tableRows = [];
+
+            const processGroup = (groupName, items) => {
+                if(items.length === 0) return;
+
+                tableRows.push([{content: `--- ${groupName} ---`, colSpan: 3, styles: {fillColor: [230, 230, 230], fontStyle: 'bold', textColor: 0}}]);
+
+                let currentPotMass = items.reduce((sum, item) => sum + item.grams, 0);
+                let currentPotRatios = null;
+
+                for(let i=0; i<items.length; i++) {
+                    const item = items[i];
+                    
+                    // --- MIXING STEP ---
+                    if (i === 0) {
+                        const mixW = item.ratios.w * currentPotMass;
+                        const mixC = item.ratios.c * currentPotMass;
+                        const mixM = item.ratios.m * currentPotMass;
+                        const mixY = item.ratios.y * currentPotMass;
+                        const mixK = item.ratios.k * currentPotMass;
+                        
+                        let recipe = [];
+                        if(mixW > 0.1) recipe.push(`White ${mixW.toFixed(1)}g`);
+                        if(mixY > 0.1) recipe.push(`Yellow ${mixY.toFixed(1)}g`);
+                        if(mixC > 0.1) recipe.push(`Cyan ${mixC.toFixed(1)}g`);
+                        if(mixM > 0.1) recipe.push(`Magenta ${mixM.toFixed(1)}g`);
+                        if(mixK > 0.01) recipe.push(`Black ${mixK.toFixed(2)}g`);
+
+                        tableRows.push([
+                            `Start Pot`, 
+                            { content: "", styles: {fillColor: [255, 255, 255]}}, 
+                            `Mix Base (Total ${currentPotMass.toFixed(1)}g):\n${recipe.join(" + ")}`
+                        ]);
+                        currentPotRatios = item.ratios;
+                    } else {
+                        let deltaStr = [];
+                        
+                        const calcDelta = (key, name) => {
+                            const target = item.ratios[key];
+                            const current = currentPotRatios[key];
+                            
+                            if (target > current + 0.001) {
+                                const safeTarget = Math.min(target, 0.95); 
+                                let amountToAdd = currentPotMass * (target - current) / (1 - safeTarget);
+                                if (amountToAdd > 0.05) {
+                                    deltaStr.push(`${name} +${amountToAdd.toFixed(2)}g`);
+                                    currentPotMass += amountToAdd; 
+                                }
+                            }
+                        };
+                        
+                        calcDelta('y', 'Yellow');
+                        calcDelta('c', 'Cyan');
+                        calcDelta('m', 'Magenta');
+                        calcDelta('k', 'Black');
+                        
+                        if (deltaStr.length > 0) {
+                            tableRows.push([
+                                `Adjust`, 
+                                { content: ">>>", styles: {halign: 'center', fontStyle: 'bold', textColor: [200,0,0]}}, 
+                                `Add to pot: ${deltaStr.join(", ")}`
+                            ]);
+                        } else {
+                             tableRows.push([`Adjust`, "", `(Use current pot)`]);
+                        }
+                        currentPotRatios = item.ratios;
+                    }
+                    
+                    // --- USAGE STEP ---
+                    tableRows.push([
+                        `Use ID ${item.id}`, 
+                        { content: "", styles: {fillColor: item.rgb}}, 
+                        `Take out ${item.grams.toFixed(1)}g`
+                    ]);
+
+                    currentPotMass -= item.grams;
+                }
+            };
+
+            paletteData.forEach(item => {
+                if (item.group.id !== currentGroupId) {
+                    processGroup(currentGroupItems.length > 0 ? currentGroupItems[0].group.name : "", currentGroupItems);
+                    currentGroupItems = [];
+                    currentGroupId = item.group.id;
+                }
+                currentGroupItems.push(item);
+            });
+            processGroup(currentGroupItems.length > 0 ? currentGroupItems[0].group.name : "", currentGroupItems);
+
+            doc.autoTable({
+                startY: 40,
+                head: [['Step', 'Ref', 'Instruction']],
+                body: tableRows,
+                theme: 'grid',
+                columnStyles: {
+                    0: { fontStyle: 'bold', width: 25 },
+                    1: { width: 15 },
+                    2: { width: 'auto' }
+                },
+                didDrawCell: (data) => {
+                    if (data.section === 'body' && data.column.index === 1) {
+                        const idMatch = data.row.raw[0].toString().match(/Use ID (\d+)/);
+                        if (idMatch) {
+                            const id = parseInt(idMatch[1]);
+                            const color = paletteData.find(x => x.id === id);
+                            if(color) {
+                                const dim = data.cell.height - 4;
+                                doc.setFillColor(color.rgb[0], color.rgb[1], color.rgb[2]);
+                                doc.rect(data.cell.x + 2, data.cell.y + 2, dim, dim, 'F');
+                            }
+                        }
+                    }
+                }
+            });
+
+            doc.save("PBN_Guide_v2.pdf");
+
+        } catch(err) {
+            console.error(err);
+            alert("Error: " + err.message);
+        }
+    }
+
+    // --- UI INJECTION ---
+    function replaceDownloadButton() {
+        const oldBtn = document.getElementById('btnDownloadPalettePNG');
+        if (!oldBtn && !document.getElementById('btnDownloadPDF')) return;
+        
+        const existing = document.getElementById('btnDownloadPDF');
+        const target = existing || oldBtn;
+        
+        const newBtn = target.cloneNode(true);
+        target.parentNode.replaceChild(newBtn, target);
+
+        newBtn.id = "btnDownloadPDF";
+        newBtn.textContent = "Download Mixing Guide (PDF)";
+        newBtn.className = "waves-effect waves-light btn"; 
+        newBtn.style.backgroundColor = "#e91e63"; 
+        newBtn.style.width = "100%"; 
+        
+        newBtn.onclick = null;
+        newBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            generatePDF();
+        });
+    }
+
+    function init() {
+        const check = setInterval(() => {
+            const panel = document.getElementById('pbnRecolorPanel');
+            if(panel) {
+                clearInterval(check);
+                if(!document.getElementById('btnDownloadPDF')) {
+                    const div = document.createElement('div');
+                    div.style.marginTop = "15px";
+                    div.style.textAlign = "center";
+                    const btn = document.createElement('a');
+                    btn.id = "btnDownloadPDF"; 
+                    div.appendChild(btn);
+                    panel.appendChild(div);
+                    replaceDownloadButton();
+                }
+            }
+        }, 500);
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+
+})();
+--- END FILE: .\scripts\upgrades\pdf-export.js ---
+
+
+--- START FILE: .\scripts\upgrades\runtime-manual-recolor.js ---
+/*
+ * PaintByNumbersGenerator – Runtime Manual Recolor v1.0
+ * 
+ * Enables manual recoloring of individual facets by clicking in the finished SVG.
+ */
+
+(() => {
+  'use strict';
+
+  const STATE = {
+    active: false,
+    facetResult: null,
+    colorsByIndex: null, // The real RGB values
+    selectedFacetId: null
+  };
+
+  function $(id) { return document.getElementById(id); }
+
+  // --- UI ---
+  function injectUI() {
+    const parent = document.querySelector('#options-pane .collection');
+    if (!parent || $('pbnManualRecolorItem')) return;
+
+    const li = document.createElement('li');
+    li.id = 'pbnManualRecolorItem';
+    li.className = 'collection-item';
+    
+    li.innerHTML = `
+      <div class="row" style="margin-bottom:0; display:flex; align-items:center;">
+        <div class="col s8">
+           <label style="font-size:1rem; color:#000; font-weight:500;">🖊️ Recolor Facets</label>
+           <p style="font-size:0.8rem; margin:0; color:#666;">
+             Enable this, then click an area in the <b>output image</b> below.
+           </p>
+        </div>
+        <div class="col s4" style="text-align:right;">
+           <div class="switch">
+            <label>
+              Off
+              <input id="chkManualRecolor" type="checkbox">
+              <span class="lever"></span>
+              On
+            </label>
+          </div>
+        </div>
+      </div>
+    `;
+
+    // Insert after the Protection Item (or at the end)
+    const ref = $('pbnProtectionItem');
+    if(ref) ref.parentNode.insertBefore(li, ref.nextSibling);
+    else parent.appendChild(li);
+
+    // Event
+    $('chkManualRecolor').addEventListener('change', (e) => {
+        STATE.active = e.target.checked;
+        updateCursor();
+    });
+
+    // Create color picker modal
+    createColorModal();
+  }
+
+  function createColorModal() {
+    if($('pbnColorModal')) return;
+
+    const div = document.createElement('div');
+    div.id = 'pbnColorModal';
+    div.className = 'modal';
+    div.style.cssText = 'max-width: 400px; max-height: 80%;';
+    
+    div.innerHTML = `
+      <div class="modal-content">
+        <h5>Select Color</h5>
+        <p>Choose a new color for the selected facet.</p>
+        <div id="pbnColorGrid" style="display:flex; flex-wrap:wrap; gap:5px; justify-content:center;"></div>
+      </div>
+      <div class="modal-footer">
+        <a href="#!" class="modal-close waves-effect waves-green btn-flat">Cancel</a>
+      </div>
+    `;
+    
+    document.body.appendChild(div);
+    // Materialize Modal init
+    if(M && M.Modal) M.Modal.init(div);
+  }
+
+  function updateCursor() {
+    const svgContainer = $('svgContainer');
+    if(!svgContainer) return;
+    svgContainer.style.cursor = STATE.active ? 'pointer' : 'default';
+  }
+
+  // --- LOGIC ---
+
+  // We need access to the data (facetResult). We patch createSVG to intercept the reference.
+  function patchProcessManager() {
+      if (typeof window.require !== 'function') return;
+
+      window.require(['guiprocessmanager'], function(GUI) {
+          if (!GUI || !GUI.GUIProcessManager) return;
+          
+          const originalCreateSVG = GUI.GUIProcessManager.createSVG;
+          
+          GUI.GUIProcessManager.createSVG = async function(facetResult, colorsByIndex, sizeMultiplier, fill, stroke, addColorLabels, fontSize, fontColor, onUpdate) {
+              
+              // STORE DATA
+              STATE.facetResult = facetResult;
+              STATE.colorsByIndex = colorsByIndex;
+              
+              // Run original
+              return await originalCreateSVG.call(this, facetResult, colorsByIndex, sizeMultiplier, fill, stroke, addColorLabels, fontSize, fontColor, onUpdate);
+          };
+          
+          console.log("✅ GUIProcessManager patched for Manual Recolor.");
+      });
+  }
+
+  function attachSvgListeners() {
+      const svg = document.querySelector('#svgContainer svg');
+      if(!svg) return;
+
+      // We use event delegation on the SVG because there are thousands of paths
+      svg.addEventListener('click', (e) => {
+          if(!STATE.active) return;
+          
+          const target = e.target;
+          // Check if it is a path (facet) or text (label)
+          // We look for the data-facetId attribute
+          let facetId = target.getAttribute('data-facetId');
+          
+          // If clicking on a label, we often hit <g> or <text>
+          // Unfortunately labels have no DOM ID link in the original code.
+          
+          if (!facetId) {
+             // Click was on text or border
+             return; 
+          }
+          
+          e.preventDefault();
+          e.stopPropagation();
+          
+          openColorPicker(parseInt(facetId));
+      });
+      
+      // Hover effect
+      svg.addEventListener('mouseover', (e) => {
+          if(!STATE.active) return;
+          if(e.target.tagName === 'path' && e.target.hasAttribute('data-facetId')) {
+              e.target.style.opacity = '0.5';
+          }
+      });
+      svg.addEventListener('mouseout', (e) => {
+          if(!STATE.active) return;
+          if(e.target.tagName === 'path') {
+              e.target.style.opacity = '1';
+          }
+      });
+  }
+
+  function openColorPicker(facetId) {
+      STATE.selectedFacetId = facetId;
+      const facet = STATE.facetResult.facets[facetId];
+      if(!facet) return;
+
+      const grid = $('pbnColorGrid');
+      grid.innerHTML = '';
+      
+      const currentColorIdx = facet.color;
+      
+      // Render palette
+      STATE.colorsByIndex.forEach((rgb, idx) => {
+          const colorStr = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+          const div = document.createElement('div');
+          
+          const isSelected = (idx === currentColorIdx);
+          
+          div.style.cssText = `
+            width: 40px; height: 40px; 
+            background-color: ${colorStr};
+            border: ${isSelected ? '3px solid red' : '1px solid #ccc'};
+            cursor: pointer;
+            border-radius: 4px;
+            display: flex; align-items: center; justify-content: center;
+            font-weight: bold;
+            color: ${getContrastYIQ(colorStr)};
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+          `;
+          
+          // Show the "new number" from the palette DOM (safest source)
+          const paletteDom = document.querySelectorAll('#palette .color');
+          let label = idx; // Fallback: index 0..N
+          if(paletteDom && paletteDom[idx]) {
+              label = paletteDom[idx].innerText; // The number the user sees (1..N)
+          }
+          div.innerText = label;
+          
+          div.onclick = () => applyColorChange(facetId, idx);
+          
+          grid.appendChild(div);
+      });
+
+      const modal = M.Modal.getInstance($('pbnColorModal'));
+      modal.open();
+  }
+
+  function applyColorChange(facetId, newColorIndex) {
+      if(!STATE.facetResult) return;
+      
+      // 1. Change data
+      STATE.facetResult.facets[facetId].color = newColorIndex;
+      
+      // 2. Close modal
+      const modal = M.Modal.getInstance($('pbnColorModal'));
+      modal.close();
+      
+      // 3. Re-render SVG
+      window.require(['gui'], function(GUI) {
+         if(GUI && GUI.updateOutput) {
+             GUI.updateOutput();
+             M.toast({html: 'Facet recolored!', classes: 'rounded green'});
+         }
+      });
+  }
+
+  // Helper
+  function getContrastYIQ(rgbStr){
+    const parts = rgbStr.match(/\d+/g);
+    if(!parts) return 'black';
+    const r = parseInt(parts[0]);
+    const g = parseInt(parts[1]);
+    const b = parseInt(parts[2]);
+    var yiq = ((r*299)+(g*587)+(b*114))/1000;
+    return (yiq >= 128) ? 'black' : 'white';
+  }
+
+  // --- INIT ---
+  function init() {
+      setTimeout(injectUI, 1000);
+      setTimeout(patchProcessManager, 2000);
+      
+      // SVG listeners must be reattached when the SVG is rebuilt
+      const container = $('svgContainer');
+      if(container) {
+          const obs = new MutationObserver(() => {
+              attachSvgListeners();
+              updateCursor();
+          });
+          obs.observe(container, {childList: true});
+      }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+
+})();
+--- END FILE: .\scripts\upgrades\runtime-manual-recolor.js ---
+
+
+--- START FILE: .\scripts\upgrades\runtime-protection.js ---
+/*
+ * PaintByNumbersGenerator – Runtime Protection v3.2 (Single Interaction & Persistence)
+ * 
+ * Features:
+ * - Interactive protection opens only on the first cleanup run.
+ * - Saves coordinates of protected areas to automatically find them in subsequent runs (where IDs change).
+ * - Zoom & Smart Filter included.
+ */
+
+(() => {
+  'use strict';
+
+  // --- STATE ---
+  const STATE = {
+    enabled: false,
+    isPaused: false,
+    hasShownUI: false,
+    
+    // Data
+    protectedIds: new Set(),
+    protectedCoords: [],
+    candidates: new Set(),
+    ignoredIds: new Set(),
+    
+    // References
+    facetResult: null,
+    colorsByIndex: null,
+    resolveFunc: null,
+    
+    // UI Settings
+    zoomLevel: 2.0,      
+    filterPercent: 50,   
+    
+    // Canvas
+    canvas: null,
+    ctx: null
+  };
+
+  function $(id) { return document.getElementById(id); }
+
+  // --- UI INTEGRATION ---
+  function injectUI() {
+    const parent = document.querySelector('#options-pane .collection');
+    if (!parent || $('pbnProtectionItem')) return;
+
+    const li = document.createElement('li');
+    li.id = 'pbnProtectionItem';
+    li.className = 'collection-item';
+    
+    li.innerHTML = `
+      <div class="row" style="margin-bottom:0;">
+        <div class="col s12">
+           <label style="font-size:1rem; color:#000; font-weight:500;">🛡️ Interactive Detail Protection v3.2</label>
+        </div>
+        
+        <div class="col s4" style="margin-top:10px;">
+           <div class="switch">
+            <label>
+              Off
+              <input id="chkEnableProtection" type="checkbox">
+              <span class="lever"></span>
+              On
+            </label>
+          </div>
+        </div>
+
+        <div class="input-field col s4" style="margin-top:0;">
+            <input id="txtProtectionZoom" type="number" value="2" min="1" max="10" step="0.5">
+            <label for="txtProtectionZoom" class="active">Preview Zoom (x)</label>
+        </div>
+
+        <div class="input-field col s4" style="margin-top:0;">
+            <input id="txtProtectionFilter" type="number" value="50" min="0" max="100">
+            <label for="txtProtectionFilter" class="active">Filter % (Dust)</label>
+        </div>
+        
+        <div class="col s12">
+            <p style="font-size:0.8rem; margin:0; color:#666;">
+            Pauses <b>once</b> during the first run. <br>
+            <b>Red:</b> Will be removed. <b>Green:</b> Protected (saved for subsequent runs).
+            </p>
+        </div>
+      </div>
+    `;
+
+    parent.insertBefore(li, parent.children[3]);
+
+    $('chkEnableProtection').addEventListener('change', (e) => STATE.enabled = e.target.checked);
+    
+    $('txtProtectionZoom').addEventListener('change', (e) => {
+        STATE.zoomLevel = parseFloat(e.target.value) || 1;
+        if(STATE.isPaused) drawInteractiveScreen(); 
+    });
+
+    $('txtProtectionFilter').addEventListener('change', (e) => {
+        STATE.filterPercent = parseInt(e.target.value) || 0;
+        if(STATE.isPaused) {
+            recalcCandidates(STATE.threshold);
+            drawInteractiveScreen();
+        }
+    });
+
+    const processBtn = $('btnProcess');
+    if (processBtn) {
+        processBtn.addEventListener('click', () => {
+            STATE.hasShownUI = false;
+            STATE.protectedCoords = [];
+            STATE.protectedIds.clear();
+        });
+    }
+
+    const floatBtn = document.createElement('div');
+    floatBtn.id = 'pbnContinueBtn';
+    floatBtn.style.cssText = `
+        position: fixed; bottom: 30px; right: 30px; z-index: 9999;
+        display: none; padding: 15px 25px; background: #26a69a; color: white;
+        font-weight: bold; font-size: 16px; border-radius: 50px;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.3); cursor: pointer;
+        transition: transform 0.2s;
+    `;
+    floatBtn.innerHTML = 'Continue <i class="material-icons" style="vertical-align:middle;">play_arrow</i>';
+    floatBtn.onclick = resumeProcess;
+    document.body.appendChild(floatBtn);
+
+    const style = document.createElement('style');
+    style.textContent = `
+        #reduction-pane {
+            overflow: auto !important;
+            max-height: 80vh;
+            background: #e0e0e0;
+            text-align: center;
+        }
+        #cReduction {
+            margin: 0 auto;
+            box-shadow: 0 0 20px rgba(0,0,0,0.2);
+            background: white;
+            image-rendering: pixelated;
+        }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function getRepresentativePoint(facetId, facetResult) {
+      const f = facetResult.facets[facetId];
+      if (!f) return null;
+      for (let y = f.bbox.minY; y <= f.bbox.maxY; y++) {
+          for (let x = f.bbox.minX; x <= f.bbox.maxX; x++) {
+              if (facetResult.facetMap.get(x, y) === facetId) {
+                  return { x, y };
+              }
+          }
+      }
+      return null;
+  }
+
+  function recalcCandidates(smallerThan) {
+      if (!STATE.facetResult) return;
+      STATE.candidates.clear();
+      STATE.ignoredIds.clear();
+      
+      const minSize = Math.floor(smallerThan * (STATE.filterPercent / 100));
+
+      for (const f of STATE.facetResult.facets) {
+          if (!f) continue;
+          if (f.pointCount < smallerThan) {
+              if (f.pointCount < minSize) {
+                  STATE.ignoredIds.add(f.id); 
+              } else {
+                  STATE.candidates.add(f.id);
+              }
+          }
+      }
+      
+      const btn = $('pbnContinueBtn');
+      if(btn) btn.innerHTML = `Continue (Delete ${STATE.candidates.size} areas) <i class="material-icons" style="vertical-align:middle;">play_arrow</i>`;
+  }
+
+  function drawInteractiveScreen() {
+    if (!STATE.canvas || !STATE.facetResult) return;
+    
+    const width = STATE.facetResult.width;
+    const height = STATE.facetResult.height;
+    const map = STATE.facetResult.facetMap;
+    const colors = STATE.colorsByIndex; 
+    
+    const displayW = Math.floor(width * STATE.zoomLevel);
+    const displayH = Math.floor(height * STATE.zoomLevel);
+    
+    STATE.canvas.width = displayW;
+    STATE.canvas.height = displayH;
+    
+    STATE.ctx.scale(STATE.zoomLevel, STATE.zoomLevel);
+
+    const bgCanvas = document.createElement('canvas');
+    bgCanvas.width = width;
+    bgCanvas.height = height;
+    const bgCtx = bgCanvas.getContext('2d');
+    const imgData = bgCtx.createImageData(width, height);
+    const data = imgData.data;
+
+    for (let i = 0; i < width * height; i++) {
+        const x = i % width;
+        const y = Math.floor(i / width);
+        const id = map.get(x, y);
+        
+        let r=255, g=255, b=255;
+        
+        const facet = STATE.facetResult.facets[id];
+        if (facet) {
+            const col = colors[facet.color]; 
+            r = col[0]; g = col[1]; b = col[2];
+            
+            if (STATE.protectedIds.has(id)) {
+                r = (r + 0) / 2; g = (g + 255) / 2; b = (b + 0) / 2;
+            } else if (STATE.candidates.has(id)) {
+                r = (r + 255) / 2; g = (g + 0) / 2; b = (b + 0) / 2;
+            } else if (STATE.ignoredIds.has(id)) {
+                r = (r + 200) / 2; g = (g + 200) / 2; b = (b + 200) / 2;
+            }
+        }
+
+        const idx = i * 4;
+        data[idx] = r; data[idx+1] = g; data[idx+2] = b; data[idx+3] = 255;
+    }
+    
+    bgCtx.putImageData(imgData, 0, 0);
+
+    STATE.ctx.imageSmoothingEnabled = false;
+    STATE.ctx.drawImage(bgCanvas, 0, 0);
+
+    STATE.ctx.fillStyle = "rgba(0,0,0,0.5)"; 
+    
+    const drawBorders = (id, color) => {
+        const f = STATE.facetResult.facets[id];
+        if (!f || !f.borderPoints) return;
+
+        STATE.ctx.fillStyle = color;
+        for (const pt of f.borderPoints) {
+            STATE.ctx.fillRect(pt.x, pt.y, 1, 1);
+        }
+    };
+
+    STATE.candidates.forEach(id => {
+        if (!STATE.protectedIds.has(id)) drawBorders(id, "rgba(200, 0, 0, 0.8)");
+    });
+
+    STATE.protectedIds.forEach(id => {
+        drawBorders(id, "rgba(0, 150, 0, 0.9)");
+    });
+  }
+
+  function handleCanvasClick(e) {
+    if (!STATE.isPaused || !STATE.facetResult) return;
+
+    const rect = STATE.canvas.getBoundingClientRect();
+    const scaleX = STATE.canvas.width / rect.width;
+    const scaleY = STATE.canvas.height / rect.height;
+
+    const canvasX = (e.clientX - rect.left) * scaleX;
+    const canvasY = (e.clientY - rect.top) * scaleY;
+
+    const originalX = Math.floor(canvasX / STATE.zoomLevel);
+    const originalY = Math.floor(canvasY / STATE.zoomLevel);
+
+    if (originalX < 0 || originalX >= STATE.facetResult.width || originalY < 0 || originalY >= STATE.facetResult.height) return;
+
+    const id = STATE.facetResult.facetMap.get(originalX, originalY);
+
+    if (STATE.candidates.has(id) || STATE.ignoredIds.has(id)) {
+        if (STATE.protectedIds.has(id)) {
+            STATE.protectedIds.delete(id);
+        } else {
+            STATE.protectedIds.add(id);
+        }
+        requestAnimationFrame(drawInteractiveScreen);
+    }
+  }
+
+  function resumeProcess() {
+    if (STATE.resolveFunc) {
+        STATE.protectedCoords = [];
+        STATE.protectedIds.forEach(id => {
+            const pt = getRepresentativePoint(id, STATE.facetResult);
+            if (pt) STATE.protectedCoords.push(pt);
+        });
+
+        $('pbnContinueBtn').style.display = 'none';
+        STATE.canvas.style.cursor = 'default';
+        STATE.canvas.removeEventListener('mousedown', handleCanvasClick);
+        STATE.isPaused = false;
+        STATE.hasShownUI = true;
+
+        STATE.resolveFunc();
+    }
+  }
+
+  function patchFacetReducer() {
+    if (typeof window.require !== 'function') return;
+
+    window.require(['facetReducer'], function(FacetReducerModule) {
+      if (!FacetReducerModule || !FacetReducerModule.FacetReducer) return;
+
+      const FacetReducer = FacetReducerModule.FacetReducer;
+      
+      if (!FacetReducer._originalReduceFacets) {
+        FacetReducer._originalReduceFacets = FacetReducer.reduceFacets;
+      }
+
+      FacetReducer.reduceFacets = async function(smallerThan, removeLargeToSmall, maxFacets, colors, facetResult, imgIndices, onUpdate) {
+        
+        if (!STATE.enabled) {
+            return await FacetReducer._originalReduceFacets.call(this, smallerThan, removeLargeToSmall, maxFacets, colors, facetResult, imgIndices, onUpdate);
+        }
+
+        STATE.facetResult = facetResult;
+        STATE.colorsByIndex = colors;
+        STATE.threshold = smallerThan;
+        
+        STATE.protectedIds.clear();
+
+        if (!STATE.hasShownUI) {
+            console.log(`[Protection] First run. Pausing for user interaction.`);
+            STATE.isPaused = true;
+            
+            recalcCandidates(smallerThan);
+
+            const tabs = M.Tabs.getInstance($('tabsOutput'));
+            if (tabs) tabs.select('reduction-pane');
+            
+            STATE.canvas = $('cReduction');
+            STATE.ctx = STATE.canvas.getContext('2d');
+            
+            STATE.canvas.addEventListener('mousedown', handleCanvasClick);
+            STATE.canvas.style.cursor = 'crosshair';
+
+            drawInteractiveScreen();
+
+            const btn = $('pbnContinueBtn');
+            btn.style.display = 'block';
+            
+            await new Promise(resolve => STATE.resolveFunc = resolve);
+            
+            if(btn) btn.innerHTML = "Processing...";
+            await new Promise(r => setTimeout(r, 50)); 
+        } 
+        else {
+            console.log(`[Protection] Subsequent run. Auto-protecting based on coordinates.`);
+            if (STATE.protectedCoords.length > 0) {
+                STATE.protectedCoords.forEach(pt => {
+                    if (pt.x < facetResult.width && pt.y < facetResult.height) {
+                        const currentId = facetResult.facetMap.get(pt.x, pt.y);
+                        STATE.protectedIds.add(currentId);
+                    }
+                });
+            }
+        }
+
+        const restoreList = [];
+        STATE.protectedIds.forEach(id => {
+            const facet = facetResult.facets[id];
+            if (facet) {
+                restoreList.push({ facet: facet, origCount: facet.pointCount });
+                facet.pointCount = 999999999; 
+            }
+        });
+
+        await FacetReducer._originalReduceFacets.call(this, smallerThan, removeLargeToSmall, maxFacets, colors, facetResult, imgIndices, onUpdate);
+
+        restoreList.forEach(item => {
+            if (item.facet) item.facet.pointCount = item.origCount;
+        });
+      };
+      
+      console.log("✅ FacetReducer patched for Interactive Mode v3.2 (Single Prompt).");
+    });
+  }
+
+  function init() {
+    setTimeout(injectUI, 1000);
+    setTimeout(patchFacetReducer, 2000);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+
+})();
+--- END FILE: .\scripts\upgrades\runtime-protection.js ---
+
+
+--- START FILE: .\scripts\upgrades\runtime-recolor.js ---
+
+/*
+ * PaintByNumbersGenerator – Runtime Recolor v4.5 (Fixed Reset Bug)
+ * 
+ * Features:
+ * - Moves Palette to the right side of the SVG.
+ * - Syncs colors and IDs.
+ * - Highlight on hover.
+ * - FIXED: Color changes no longer reset automatically due to correct 'data-orig-bg' tracking.
+ */
+
+(() => {
+  'use strict';
+
+  // --- STATE MANAGEMENT ---
+  const STATE = {
+    palette: [], 
+    mapping: new Map(),
+    indexMap: new Map() 
+  };
+
+  function $(sel, root = document) { return root.querySelector(sel); }
+  function $all(sel, root = document) { return Array.from(root.querySelectorAll(sel)); }
+
+  function getSvg() {
+    const c = $('#svgContainer');
+    return c ? c.querySelector('svg') : null;
+  }
+
+  function injectStyles() {
+    if ($('#pbn-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'pbn-styles';
+    style.textContent = `
+      .pbn-highlight-path {
+        stroke: #ff0000 !important;
+        stroke-width: 3px !important;
+        vector-effect: non-scaling-stroke;
+        opacity: 0.9 !important;
+      }
+      .pbn-highlight-text {
+        fill: #ff0000 !important;
+        font-weight: bold;
+        font-size: 1.2em;
+      }
+      .pbn-row-hover {
+        background-color: #e0f2f1 !important;
+        cursor: crosshair;
+      }
+      /* Layout Fixes */
+      #pbn-flex-wrapper {
+          display: flex;
+          flex-wrap: nowrap;
+          align-items: flex-start;
+          gap: 15px;
+      }
+      #svgContainer {
+          flex-grow: 1;
+          min-width: 0; 
+      }
+      #pbnRecolorPanel {
+          width: 280px;
+          flex-shrink: 0;
+          margin-top: 0 !important;
+          max-height: 80vh;
+          overflow-y: auto;
+          z-index: 10;
+      }
+      @media (max-width: 900px) {
+          #pbn-flex-wrapper {
+              flex-wrap: wrap;
+          }
+          #pbnRecolorPanel {
+              width: 100%;
+              max-height: 400px;
+          }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  // --- COLOR UTILS ---
+  function rgbToHex(r, g, b) {
+    const to = (x) => x.toString(16).padStart(2, '0');
+    return `#${to(r)}${to(g)}${to(b)}`;
+  }
+
+  function parseColorToHex(color) {
+    if (!color) return null;
+    const c = String(color).trim().toLowerCase();
+    if (!c || c === 'none' || c === 'transparent') return null;
+
+    if (c.startsWith('#')) {
+      if (c.length === 4) return `#${c[1]}${c[1]}${c[2]}${c[2]}${c[3]}${c[3]}`;
+      return c.substring(0, 7);
+    }
+    if (c.startsWith('rgb')) {
+      const parts = c.match(/\d+/g);
+      if (parts && parts.length >= 3) return rgbToHex(Number(parts[0]), Number(parts[1]), Number(parts[2]));
+    }
+    return null;
+  }
+
+  function hexToRgb(hex) {
+    const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+    return m ? { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) } : null;
+  }
+
+  function rgbToHsl(r, g, b) {
+    r /= 255; g /= 255; b /= 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    let h = 0, s = 0, l = (max + min) / 2;
+    if (max !== min) {
+      const d = max - min;
+      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+      switch (max) {
+        case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+        case g: h = (b - r) / d + 2; break;
+        case b: h = (r - g) / d + 4; break;
+      }
+      h *= 60;
+    }
+    return { h: h < 0 ? h + 360 : h, s, l };
+  }
+
+  function getCategory(h, s, l) {
+    if (l > 0.90) return { order: 1, label: '⚪ White / Light' };
+    if (l < 0.1) return { order: 99, label: '⚫ Black / Dark' };
+    if (s < 0.12) return { order: 90, label: '🌫️ Gray / Neutral' };
+    if (h >= 330 || h < 60) return { order: 10, label: '🟡🔴 Yellow & Red' };
+    if (h >= 60 && h < 170) return { order: 20, label: '🟢 Green & Cyan' };
+    return { order: 30, label: '🔵🟣 Blue & Purple' };
+  }
+
+  // --- CORE LOGIC ---
+  function analyzeOriginalData() {
+    const rawPalette = [];
+    const tiles = $all('#palette .color');
+    
+    tiles.forEach(tile => {
+      // Use stored original hex if available, otherwise read current style
+      let origHex = tile.getAttribute('data-orig-bg');
+      if (!origHex) {
+          origHex = parseColorToHex(tile.style.backgroundColor);
+          if (origHex) tile.setAttribute('data-orig-bg', origHex);
+      }
+
+      let nr = tile.getAttribute('data-orig-id');
+      if (!nr) {
+        nr = tile.innerText.trim();
+        if (nr !== '') {
+            tile.setAttribute('data-orig-id', nr);
+        }
+      }
+
+      if (origHex && nr !== '') {
+        rawPalette.push({
+          id: nr,
+          origHex: origHex
+        });
+      }
+    });
+    return rawPalette;
+  }
+
+  function arePalettesEqual(oldPalette, newRawData) {
+    if (!oldPalette || oldPalette.length === 0) return false;
+    if (oldPalette.length !== newRawData.length) return false;
+
+    const oldMap = new Map();
+    oldPalette.forEach(p => oldMap.set(p.id, p.origHex));
+
+    for (const newItem of newRawData) {
+        if (!oldMap.has(newItem.id)) return false;
+        if (oldMap.get(newItem.id) !== newItem.origHex) return false;
+    }
+    return true;
+  }
+
+  function refreshStateFromDom() {
+    const newRawData = analyzeOriginalData();
+    const isSameImage = arePalettesEqual(STATE.palette, newRawData);
+
+    // Only clear mappings if the base image clusters have actually changed
+    if (!isSameImage) {
+        STATE.mapping.clear();
+    }
+    STATE.palette = newRawData;
+    performResort();
+  }
+
+  function performResort() {
+    STATE.palette.forEach(item => {
+        const userOverride = STATE.mapping.get(item.origHex);
+        const currentHex = userOverride || item.origHex;
+        const rgb = hexToRgb(currentHex) || {r:0,g:0,b:0};
+        const hsl = rgbToHsl(rgb.r, rgb.g, rgb.b);
+        const cat = getCategory(hsl.h, hsl.s, hsl.l);
+
+        item.groupOrder = cat.order;
+        item.groupLabel = cat.label;
+        item.light = hsl.l;
+    });
+
+    STATE.palette.sort((a, b) => {
+      if (a.groupOrder !== b.groupOrder) return a.groupOrder - b.groupOrder;
+      return b.light - a.light;
+    });
+
+    STATE.indexMap.clear();
+    STATE.palette.forEach((item, idx) => {
+      const newNr = idx + 1;
+      STATE.indexMap.set(item.id, newNr);
+      item.newNr = newNr;
+    });
+
+    updateRuntimeInterface();
+    updateNativePalette();
+    updateSvgContent();
+  }
+
+  function toggleHighlight(originalId, originalHex, active) {
+    const svg = getSvg();
+    if (!svg) return;
+
+    const paths = $all(`path[data-orig-fill="${originalHex}"]`, svg);
+    paths.forEach(p => {
+        if (active) p.classList.add('pbn-highlight-path');
+        else p.classList.remove('pbn-highlight-path');
+    });
+
+    const texts = $all(`text`, svg);
+    texts.forEach(t => {
+        if (t.getAttribute('data-orig-text') === String(originalId)) {
+            if (active) t.classList.add('pbn-highlight-text');
+            else t.classList.remove('pbn-highlight-text');
+        }
+    });
+  }
+
+  function updateRuntimeInterface() {
+    const list = $('#pbnRecolorList');
+    if (!list) return;
+    
+    const scrollPos = list.scrollTop;
+    list.innerHTML = '';
+
+    let lastLabel = '';
+
+    STATE.palette.forEach(item => {
+      const currentHex = STATE.mapping.get(item.origHex) || item.origHex;
+
+      if (item.groupLabel !== lastLabel) {
+        const h = document.createElement('div');
+        h.style.cssText = 'padding:6px 0 2px 0;margin-top:5px;font-size:0.75rem;font-weight:bold;color:#666;border-bottom:1px solid #eee;';
+        h.textContent = item.groupLabel;
+        list.appendChild(h);
+        lastLabel = item.groupLabel;
+      }
+
+      const row = document.createElement('div');
+      row.className = 'pbn-row';
+      row.style.cssText = 'display:flex;gap:6px;align-items:center;margin-bottom:2px;padding:2px 0;border-radius:4px;transition:background 0.2s;';
+
+      row.addEventListener('mouseenter', () => {
+          row.classList.add('pbn-row-hover');
+          toggleHighlight(item.id, item.origHex, true);
+      });
+      row.addEventListener('mouseleave', () => {
+          row.classList.remove('pbn-row-hover');
+          toggleHighlight(item.id, item.origHex, false);
+      });
+
+      const nr = document.createElement('div');
+      nr.textContent = `#${item.newNr}`;
+      nr.style.cssText = 'font-weight:bold;width:30px;text-align:right;font-size:12px;color:#333;pointer-events:none;';
+
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.value = currentHex;
+      inp.style.cssText = `
+        width:80px; height:24px; font-size:12px; border:1px solid #ccc; padding:0 4px; margin:0;
+        background-color: ${currentHex};
+        color: ${getContrastYIQ(currentHex)};
+        text-shadow: none;
+      `;
+      
+      inp.addEventListener('change', (e) => {
+        let val = e.target.value.trim();
+        if (/^[0-9a-f]{6}$/i.test(val)) val = '#' + val;
+        
+        const valid = parseColorToHex(val);
+        if (valid) {
+          STATE.mapping.set(item.origHex, valid);
+        } else {
+          STATE.mapping.delete(item.origHex);
+        }
+        
+        requestAnimationFrame(() => {
+            performResort();
+        });
+      });
+
+      row.append(nr, inp);
+      list.appendChild(row);
+    });
+
+    list.scrollTop = scrollPos;
+  }
+
+  function updateNativePalette() {
+    const container = $('#palette');
+    if (!container) return;
+
+    container.innerHTML = '';
+
+    STATE.palette.forEach(item => {
+      const currentHex = STATE.mapping.get(item.origHex) || item.origHex;
+      
+      const div = document.createElement('div');
+      div.className = 'color tooltipped';
+      div.style.cssText = `
+        float: left; width: 40px; height: 40px; 
+        border: 1px solid #AAA; border-radius: 5px; 
+        text-align: center; padding: 5px; font-weight: 600; margin: 5px;
+        background-color: ${currentHex};
+        color: ${getContrastYIQ(currentHex)};
+        text-shadow: none;
+      `;
+      div.innerText = item.newNr;
+      div.setAttribute('data-tooltip', `Original ID: ${item.id} | Hex: ${currentHex}`);
+      div.setAttribute('data-orig-id', item.id);
+      div.setAttribute('data-orig-bg', item.origHex);
+      
+      container.appendChild(div);
+    });
+    
+    if (window.M && M.Tooltip) M.Tooltip.init($all('.tooltipped'));
+  }
+
+  function updateSvgContent() {
+    const svg = getSvg();
+    if (!svg) return;
+
+    $all('path, polygon, rect, circle', svg).forEach(el => {
+        let hex = el.getAttribute('data-orig-fill');
+        if (!hex) {
+            hex = parseColorToHex(el.getAttribute('fill') || el.style.fill);
+            if (hex) el.setAttribute('data-orig-fill', hex);
+        }
+
+        if (hex) {
+            const newHex = STATE.mapping.get(hex);
+            if (newHex) {
+                el.setAttribute('fill', newHex);
+                el.style.fill = newHex;
+            } else {
+                el.setAttribute('fill', hex);
+                el.style.fill = hex;
+            }
+        }
+    });
+
+    $all('text', svg).forEach(el => {
+        let originalId = el.getAttribute('data-orig-text');
+        
+        if (!originalId) {
+            const textContent = el.textContent.trim();
+            if (/^\d+$/.test(textContent)) {
+                originalId = textContent;
+                el.setAttribute('data-orig-text', originalId);
+            } else {
+                return;
+            }
+        }
+
+        const newNr = STATE.indexMap.get(originalId);
+        if (newNr !== undefined) {
+            el.textContent = newNr;
+        }
+    });
+  }
+
+  function hijackDownloadButton() {
+    const btn = $('#btnDownloadPalettePNG');
+    if (!btn) return;
+
+    const newBtn = btn.cloneNode(true);
+    btn.parentNode.replaceChild(newBtn, btn);
+
+    newBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      generateCustomPalettePng();
+    });
+  }
+
+  function generateCustomPalettePng() {
+    const canvas = document.createElement("canvas");
+    const items = STATE.palette; 
+
+    const nrOfItemsPerRow = 5; 
+    const nrRows = Math.ceil(items.length / nrOfItemsPerRow);
+    
+    const margin = 20;
+    const cellWidth = 150;
+    const cellHeight = 100;
+
+    canvas.width = margin + nrOfItemsPerRow * (cellWidth + margin);
+    canvas.height = margin + nrRows * (cellHeight + margin);
+    
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.font = "bold 24px Arial";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    items.forEach((item, i) => {
+      const currentHex = STATE.mapping.get(item.origHex) || item.origHex;
+      
+      const col = i % nrOfItemsPerRow;
+      const row = Math.floor(i / nrOfItemsPerRow);
+
+      const x = margin + col * (cellWidth + margin);
+      const y = margin + row * (cellHeight + margin);
+
+      ctx.fillStyle = currentHex;
+      ctx.fillRect(x, y, cellWidth, cellHeight - 30);
+      
+      ctx.strokeStyle = "#444";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, cellWidth, cellHeight - 30);
+
+      ctx.fillStyle = getContrastYIQ(currentHex);
+      ctx.fillText(item.newNr, x + cellWidth / 2, y + (cellHeight - 30) / 2);
+
+      ctx.fillStyle = "black";
+      ctx.font = "14px Arial";
+      ctx.fillText(currentHex, x + cellWidth / 2, y + cellHeight - 10);
+      
+      ctx.font = "bold 24px Arial";
+    });
+
+    const link = document.createElement('a');
+    link.download = 'Sorted_Palette.png';
+    link.href = canvas.toDataURL();
+    link.click();
+  }
+
+  function getContrastYIQ(hexcolor){
+    hexcolor = hexcolor.replace("#", "");
+    var r = parseInt(hexcolor.substr(0,2),16);
+    var g = parseInt(hexcolor.substr(2,2),16);
+    var b = parseInt(hexcolor.substr(4,2),16);
+    var yiq = ((r*299)+(g*587)+(b*114))/1000;
+    return (yiq >= 128) ? 'black' : 'white';
+  }
+
+  function ensureLayoutAndPanel() {
+    if ($('#pbnRecolorPanel')) return;
+
+    const svgContainer = $('#svgContainer');
+    if (!svgContainer) return;
+
+    const parent = svgContainer.parentElement;
+    
+    let wrapper = $('#pbn-flex-wrapper');
+    if (!wrapper) {
+        wrapper = document.createElement('div');
+        wrapper.id = 'pbn-flex-wrapper';
+        parent.insertBefore(wrapper, svgContainer);
+        wrapper.appendChild(svgContainer);
+    }
+
+    const panel = document.createElement('div');
+    panel.id = 'pbnRecolorPanel';
+    panel.className = 'card-panel';
+    panel.style.cssText = 'padding:15px; background:#fafafa; border-left:5px solid #26a69a;';
+    
+    panel.innerHTML = `
+      <h5 style="margin-top:0;font-size:1.2rem;">🎨 Colors</h5>
+      <p style="font-size:0.8rem;color:#666;">
+        Colors sorted (White -> Black).<br>
+        <i>Hover row to highlight area.</i>
+      </p>
+      <div id="pbnRecolorList" style="padding-right:5px;"></div>
+    `;
+
+    wrapper.appendChild(panel);
+  }
+
+  function init() {
+    injectStyles();
+    
+    const container = $('#svgContainer');
+    if (container) {
+      const obs = new MutationObserver((mutations) => {
+        const hasSvg = mutations.some(m => Array.from(m.addedNodes).some(n => n.nodeName === 'svg'));
+        if (hasSvg) {
+          setTimeout(() => {
+            refreshStateFromDom(); 
+            hijackDownloadButton();
+          }, 500);
+        }
+      });
+      obs.observe(container, { childList: true });
+    }
+
+    setTimeout(ensureLayoutAndPanel, 500);
+    
+    if (getSvg()) {
+        refreshStateFromDom();
+        hijackDownloadButton();
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+
+})();
+
+--- END FILE: .\scripts\upgrades\runtime-recolor.js ---
+
+
+--- START FILE: .\scripts\upgrades\runtime-target-size.js ---
+/*
+ * PaintByNumbersGenerator – Runtime extension v1.7
+ * Feature: Target SVG size (mm) + Browser Zoom Control
+ * 
+ * UPDATE: Fixed "Fit to Window".
+ * - Uses max-height/max-width logic (contain) instead of forcing width:100%.
+ * - Centers the image vertically and horizontally.
+ * - Prevents vertical scrolling in Fit mode.
+ */
+
+(() => {
+  'use strict';
+
+  const DEFAULT_W = 800;
+  const DEFAULT_H = 600;
+  const LS_KEY = 'pbn_target_size_mm';
+
+  // State for preview display
+  let displayScaleMode = 'fit'; // 'fit' or 'custom'
+  let displayScaleValue = 100;  // percentage
+
+  function clamp(n, min, max) {
+    n = Number(n);
+    if (!Number.isFinite(n)) return min;
+    return Math.min(max, Math.max(min, n));
+  }
+
+  function normalizeMm(v, fallback) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return fallback;
+    return clamp(n, 10, 5000);
+  }
+
+  function load() {
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (!raw) return { w: DEFAULT_W, h: DEFAULT_H };
+      const obj = JSON.parse(raw);
+      return {
+        w: normalizeMm(obj.w, DEFAULT_W),
+        h: normalizeMm(obj.h, DEFAULT_H),
+      };
+    } catch {
+      return { w: DEFAULT_W, h: DEFAULT_H };
+    }
+  }
+
+  function save(w, h) {
+    try {
+      localStorage.setItem(LS_KEY, JSON.stringify({ w, h }));
+    } catch { /* ignore */ }
+  }
+
+  function ensureSettings() {
+    if (!window.__pbnRuntimeSettings) window.__pbnRuntimeSettings = {};
+    if (!window.__pbnRuntimeSettings.targetSizeMm) {
+      const { w, h } = load();
+      window.__pbnRuntimeSettings.targetSizeMm = { w, h };
+    }
+    return window.__pbnRuntimeSettings;
+  }
+
+  function getSvg() {
+    const container = document.querySelector('#svgContainer');
+    if (!container) return null;
+    return container.querySelector('svg');
+  }
+
+  function applySizeToSvg(svg, wMm, hMm) {
+    if (!svg) return;
+
+    // 1. Ensure viewBox exists
+    const currentW = svg.getAttribute('width');
+    const currentH = svg.getAttribute('height');
+
+    if (currentW && currentH && !currentW.endsWith('mm') && !currentW.endsWith('%')) {
+        const vpW = parseFloat(currentW);
+        const vpH = parseFloat(currentH);
+        if (!isNaN(vpW) && !isNaN(vpH)) {
+            svg.setAttribute('viewBox', `0 0 ${vpW} ${vpH}`);
+            svg.setAttribute('data-original-width-px', vpW);
+            svg.setAttribute('data-original-height-px', vpH);
+        }
+    } else if (!svg.hasAttribute('viewBox')) {
+        const storedW = svg.getAttribute('data-original-width-px');
+        const storedH = svg.getAttribute('data-original-height-px');
+        if (storedW && storedH) {
+             svg.setAttribute('viewBox', `0 0 ${storedW} ${storedH}`);
+        }
+    }
+
+    // 2. Set Attributes for EXPORT
+    svg.setAttribute('width', `${wMm}mm`);
+    svg.setAttribute('height', `${hMm}mm`);
+
+    // 3. Set Styles for PREVIEW
+    const container = document.getElementById('svgContainer');
+    
+    if (displayScaleMode === 'fit') {
+        if(container) {
+            // Restrict container height to viewport minus headers (~70vh)
+            // Use flexbox to center the image if it is smaller than the area
+            container.style.height = '70vh'; 
+            container.style.maxHeight = '70vh';
+            container.style.overflow = 'hidden'; // No scrollbars in fit mode
+            container.style.border = '1px solid #f0f0f0';
+            container.style.display = 'flex';
+            container.style.alignItems = 'center';
+            container.style.justifyContent = 'center';
+            container.style.backgroundColor = '#fff';
+        }
+        // Tell SVG to fit inside, maintaining aspect ratio, without exceeding bounds
+        svg.style.setProperty('width', 'auto', 'important');
+        svg.style.setProperty('height', 'auto', 'important');
+        svg.style.setProperty('max-width', '100%', 'important');
+        svg.style.setProperty('max-height', '100%', 'important');
+    } else {
+        // Custom Zoom Mode
+        if(container) {
+            container.style.height = '70vh';
+            container.style.maxHeight = '70vh';
+            container.style.overflow = 'auto'; // Scrollbars allowed
+            container.style.border = '1px dashed #ccc';
+            container.style.display = 'block'; // Normal block layout for scrolling
+        }
+        // Force width based on slider
+        svg.style.setProperty('width', `${displayScaleValue}%`, 'important');
+        svg.style.setProperty('height', 'auto', 'important');
+        svg.style.setProperty('max-width', 'none', 'important');
+        svg.style.setProperty('max-height', 'none', 'important');
+    }
+  }
+
+  function scheduleApply() {
+    const settings = ensureSettings();
+    const svg = getSvg();
+    if (!svg) return;
+
+    requestAnimationFrame(() => {
+      applySizeToSvg(getSvg(), settings.targetSizeMm.w, settings.targetSizeMm.h);
+    });
+  }
+
+  function injectUI() {
+    const settings = ensureSettings();
+
+    // Target #options-pane
+    const optionsPane = document.getElementById('options-pane');
+    if (!optionsPane) return;
+
+    if (document.querySelector('#pbnTargetSizeFieldset')) return;
+
+    const fieldset = document.createElement('fieldset');
+    fieldset.id = 'pbnTargetSizeFieldset';
+    fieldset.style.cssText = 'margin:10px 20px; padding:10px; border:1px solid #ccc; border-radius:6px; background: #fff;';
+
+    const legend = document.createElement('legend');
+    legend.textContent = 'Output: Size & Preview';
+    legend.style.cssText = 'padding:0 6px; font-weight:600; color: #000000;';
+
+    // --- Dimensions Inputs ---
+    const rowDims = document.createElement('div');
+    rowDims.style.cssText = 'display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px;';
+
+    function mkNumber(label, id, value) {
+      const wrap = document.createElement('label');
+      wrap.style.cssText = 'display:flex;gap:6px;align-items:center;';
+      wrap.setAttribute('for', id);
+
+      const span = document.createElement('span');
+      span.textContent = label;
+
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.id = id;
+      input.min = '10';
+      input.max = '5000';
+      input.step = '1';
+      input.value = String(value);
+      input.style.cssText = 'width:70px;height:30px;';
+
+      const unit = document.createElement('span');
+      unit.textContent = 'mm';
+      unit.style.opacity = '0.7';
+
+      wrap.append(span, input, unit);
+      return { wrap, input };
+    }
+
+    const wCtrl = mkNumber('Width:', 'pbnTargetW', settings.targetSizeMm.w);
+    const hCtrl = mkNumber('Height:', 'pbnTargetH', settings.targetSizeMm.h);
+
+    function onSizeChange() {
+      const w = normalizeMm(wCtrl.input.value, DEFAULT_W);
+      const h = normalizeMm(hCtrl.input.value, DEFAULT_H);
+      settings.targetSizeMm = { w, h };
+      save(w, h);
+      scheduleApply();
+    }
+
+    wCtrl.input.addEventListener('input', onSizeChange);
+    hCtrl.input.addEventListener('input', onSizeChange);
+
+    rowDims.append(wCtrl.wrap, hCtrl.wrap);
+
+    // --- Preview Zoom UI ---
+    const rowScale = document.createElement('div');
+    rowScale.style.cssText = 'display:flex;gap:10px;align-items:center;flex-wrap:wrap;border-top:1px dashed #ddd;padding-top:10px;';
+    
+    const fitLabel = document.createElement('label');
+    fitLabel.style.display = 'flex';
+    fitLabel.style.alignItems = 'center';
+    fitLabel.style.cursor = 'pointer';
+    
+    const fitCheck = document.createElement('input');
+    fitCheck.type = 'checkbox';
+    fitCheck.checked = true; 
+    
+    const fitText = document.createElement('span');
+    fitText.textContent = 'Fit Preview to Window';
+    fitText.style.marginLeft = '5px';
+    fitText.style.fontSize = '0.9rem';
+    fitText.style.fontWeight = '500';
+    fitText.style.color = '#000';
+    
+    fitLabel.append(fitCheck, fitText);
+
+    const sliderContainer = document.createElement('div');
+    sliderContainer.style.cssText = 'display:none; align-items:center; gap:5px; flex-grow:1;';
+    
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = '10';
+    slider.max = '400';
+    slider.value = '100';
+    slider.style.cssText = 'margin:0; border:none; padding:0; flex-grow:1; height:30px;';
+    
+    const sliderVal = document.createElement('span');
+    sliderVal.textContent = '100%';
+    sliderVal.style.minWidth = '40px';
+    sliderVal.style.fontSize = '0.8rem';
+    sliderVal.style.textAlign = 'right';
+
+    sliderContainer.append(slider, sliderVal);
+
+    fitCheck.addEventListener('change', () => {
+        if (fitCheck.checked) {
+            displayScaleMode = 'fit';
+            sliderContainer.style.display = 'none';
+        } else {
+            displayScaleMode = 'custom';
+            sliderContainer.style.display = 'flex';
+        }
+        scheduleApply();
+    });
+
+    slider.addEventListener('input', () => {
+        displayScaleValue = slider.value;
+        sliderVal.textContent = slider.value + '%';
+        if (!fitCheck.checked) {
+            scheduleApply();
+        }
+    });
+
+    rowScale.append(fitLabel, sliderContainer);
+
+    fieldset.append(legend, rowDims, rowScale);
+
+    optionsPane.appendChild(fieldset);
+
+    scheduleApply();
+  }
+
+  function observeSvgChanges() {
+    const container = document.querySelector('#svgContainer');
+    if (!container) return;
+
+    const obs = new MutationObserver(() => {
+      scheduleApply();
+    });
+
+    obs.observe(container, { childList: true, subtree: true });
+  }
+
+  window.__pbnGetTargetSizeMm = function __pbnGetTargetSizeMm() {
+    const settings = ensureSettings();
+    return { ...settings.targetSizeMm };
+  };
+
+  function init() {
+    injectUI();
+    observeSvgChanges();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    init();
+  }
+})();
+--- END FILE: .\scripts\upgrades\runtime-target-size.js ---
 
 
 --- START FILE: .\src\colorreductionmanagement.ts ---

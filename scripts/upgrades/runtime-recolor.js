@@ -1,6 +1,12 @@
+
 /*
- * PaintByNumbersGenerator – Runtime Recolor v4.3 (Sync Fix + Highlighting)
- * English Translation
+ * PaintByNumbersGenerator – Runtime Recolor v4.5 (Fixed Reset Bug)
+ * 
+ * Features:
+ * - Moves Palette to the right side of the SVG.
+ * - Syncs colors and IDs.
+ * - Highlight on hover.
+ * - FIXED: Color changes no longer reset automatically due to correct 'data-orig-bg' tracking.
  */
 
 (() => {
@@ -40,6 +46,34 @@
       .pbn-row-hover {
         background-color: #e0f2f1 !important;
         cursor: crosshair;
+      }
+      /* Layout Fixes */
+      #pbn-flex-wrapper {
+          display: flex;
+          flex-wrap: nowrap;
+          align-items: flex-start;
+          gap: 15px;
+      }
+      #svgContainer {
+          flex-grow: 1;
+          min-width: 0; 
+      }
+      #pbnRecolorPanel {
+          width: 280px;
+          flex-shrink: 0;
+          margin-top: 0 !important;
+          max-height: 80vh;
+          overflow-y: auto;
+          z-index: 10;
+      }
+      @media (max-width: 900px) {
+          #pbn-flex-wrapper {
+              flex-wrap: wrap;
+          }
+          #pbnRecolorPanel {
+              width: 100%;
+              max-height: 400px;
+          }
       }
     `;
     document.head.appendChild(style);
@@ -89,7 +123,6 @@
     return { h: h < 0 ? h + 360 : h, s, l };
   }
 
-  // --- SORTING LOGIC ---
   function getCategory(h, s, l) {
     if (l > 0.90) return { order: 1, label: '⚪ White / Light' };
     if (l < 0.1) return { order: 99, label: '⚫ Black / Dark' };
@@ -99,15 +132,20 @@
     return { order: 30, label: '🔵🟣 Blue & Purple' };
   }
 
-  // --- CORE ANALYSIS ---
+  // --- CORE LOGIC ---
   function analyzeOriginalData() {
     const rawPalette = [];
     const tiles = $all('#palette .color');
     
     tiles.forEach(tile => {
-      const bg = parseColorToHex(tile.style.backgroundColor);
+      // Use stored original hex if available, otherwise read current style
+      let origHex = tile.getAttribute('data-orig-bg');
+      if (!origHex) {
+          origHex = parseColorToHex(tile.style.backgroundColor);
+          if (origHex) tile.setAttribute('data-orig-bg', origHex);
+      }
+
       let nr = tile.getAttribute('data-orig-id');
-      
       if (!nr) {
         nr = tile.innerText.trim();
         if (nr !== '') {
@@ -115,14 +153,10 @@
         }
       }
 
-      if (bg && nr !== '') {
-        if (!tile.hasAttribute('data-orig-bg')) {
-          tile.setAttribute('data-orig-bg', bg);
-        }
-        
+      if (origHex && nr !== '') {
         rawPalette.push({
           id: nr,
-          origHex: bg
+          origHex: origHex
         });
       }
     });
@@ -147,6 +181,7 @@
     const newRawData = analyzeOriginalData();
     const isSameImage = arePalettesEqual(STATE.palette, newRawData);
 
+    // Only clear mappings if the base image clusters have actually changed
     if (!isSameImage) {
         STATE.mapping.clear();
     }
@@ -156,7 +191,8 @@
 
   function performResort() {
     STATE.palette.forEach(item => {
-        const currentHex = STATE.mapping.get(item.origHex) || item.origHex;
+        const userOverride = STATE.mapping.get(item.origHex);
+        const currentHex = userOverride || item.origHex;
         const rgb = hexToRgb(currentHex) || {r:0,g:0,b:0};
         const hsl = rgbToHsl(rgb.r, rgb.g, rgb.b);
         const cat = getCategory(hsl.h, hsl.s, hsl.l);
@@ -193,10 +229,12 @@
         else p.classList.remove('pbn-highlight-path');
     });
 
-    const texts = $all(`text[data-orig-text="${originalId}"]`, svg);
+    const texts = $all(`text`, svg);
     texts.forEach(t => {
-        if (active) t.classList.add('pbn-highlight-text');
-        else t.classList.remove('pbn-highlight-text');
+        if (t.getAttribute('data-orig-text') === String(originalId)) {
+            if (active) t.classList.add('pbn-highlight-text');
+            else t.classList.remove('pbn-highlight-text');
+        }
     });
   }
 
@@ -241,7 +279,7 @@
       inp.type = 'text';
       inp.value = currentHex;
       inp.style.cssText = `
-        width:70px; height:24px; font-size:12px; border:1px solid #ccc; padding:0 4px; margin:0;
+        width:80px; height:24px; font-size:12px; border:1px solid #ccc; padding:0 4px; margin:0;
         background-color: ${currentHex};
         color: ${getContrastYIQ(currentHex)};
         text-shadow: none;
@@ -419,27 +457,37 @@
     return (yiq >= 128) ? 'black' : 'white';
   }
 
-  function ensurePanel() {
+  function ensureLayoutAndPanel() {
     if ($('#pbnRecolorPanel')) return;
-    const anchor = $('#output-pane .row:last-child') || $('#output-pane');
-    if (!anchor) return;
+
+    const svgContainer = $('#svgContainer');
+    if (!svgContainer) return;
+
+    const parent = svgContainer.parentElement;
+    
+    let wrapper = $('#pbn-flex-wrapper');
+    if (!wrapper) {
+        wrapper = document.createElement('div');
+        wrapper.id = 'pbn-flex-wrapper';
+        parent.insertBefore(wrapper, svgContainer);
+        wrapper.appendChild(svgContainer);
+    }
 
     const panel = document.createElement('div');
     panel.id = 'pbnRecolorPanel';
     panel.className = 'card-panel';
-    panel.style.cssText = 'margin-top:20px;padding:15px;background:#fafafa;border-left:5px solid #26a69a;';
+    panel.style.cssText = 'padding:15px; background:#fafafa; border-left:5px solid #26a69a;';
     
     panel.innerHTML = `
-      <h5 style="margin-top:0;font-size:1.2rem;">🎨 Palette & Colors</h5>
+      <h5 style="margin-top:0;font-size:1.2rem;">🎨 Colors</h5>
       <p style="font-size:0.8rem;color:#666;">
-        Colors have been automatically sorted (White -> Chromatic -> Black).<br>
-        Change colors here. <b>Note:</b> Numbers in the image adapt to the new sorting order!
-        <br><i>Tip: Hover over a color to find it in the image.</i>
+        Colors sorted (White -> Black).<br>
+        <i>Hover row to highlight area.</i>
       </p>
-      <div id="pbnRecolorList" style="max-height:400px;overflow-y:auto;padding-right:10px;"></div>
+      <div id="pbnRecolorList" style="padding-right:5px;"></div>
     `;
 
-    anchor.parentElement.appendChild(panel);
+    wrapper.appendChild(panel);
   }
 
   function init() {
@@ -459,7 +507,7 @@
       obs.observe(container, { childList: true });
     }
 
-    ensurePanel();
+    setTimeout(ensureLayoutAndPanel, 500);
     
     if (getSvg()) {
         refreshStateFromDom();

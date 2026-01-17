@@ -1,519 +1,253 @@
 /*
- * PaintByNumbersGenerator – Runtime Recolor v4.4 (Side-by-Side Layout)
+ * PaintByNumbersGenerator – Runtime Manual Recolor v1.0
  * 
- * Features:
- * - Moves Palette to the right side of the SVG.
- * - Syncs colors and IDs.
- * - Highlight on hover.
+ * Enables manual recoloring of individual facets by clicking in the finished SVG.
  */
 
 (() => {
   'use strict';
 
-  // --- STATE MANAGEMENT ---
   const STATE = {
-    palette: [], 
-    mapping: new Map(),
-    indexMap: new Map() 
+    active: false,
+    facetResult: null,
+    colorsByIndex: null, // The real RGB values
+    selectedFacetId: null
   };
 
-  function $(sel, root = document) { return root.querySelector(sel); }
-  function $all(sel, root = document) { return Array.from(root.querySelectorAll(sel)); }
+  function $(id) { return document.getElementById(id); }
 
-  function getSvg() {
-    const c = $('#svgContainer');
-    return c ? c.querySelector('svg') : null;
-  }
+  // --- UI ---
+  function injectUI() {
+    const parent = document.querySelector('#options-pane .collection');
+    if (!parent || $('pbnManualRecolorItem')) return;
 
-  function injectStyles() {
-    if ($('#pbn-styles')) return;
-    const style = document.createElement('style');
-    style.id = 'pbn-styles';
-    style.textContent = `
-      .pbn-highlight-path {
-        stroke: #ff0000 !important;
-        stroke-width: 3px !important;
-        vector-effect: non-scaling-stroke;
-        opacity: 0.9 !important;
-      }
-      .pbn-highlight-text {
-        fill: #ff0000 !important;
-        font-weight: bold;
-        font-size: 1.2em;
-      }
-      .pbn-row-hover {
-        background-color: #e0f2f1 !important;
-        cursor: crosshair;
-      }
-      /* Layout Fixes */
-      #pbn-flex-wrapper {
-          display: flex;
-          flex-wrap: nowrap;
-          align-items: flex-start;
-          gap: 15px;
-      }
-      #svgContainer {
-          flex-grow: 1;
-          min-width: 0; /* Important for flex items to shrink */
-      }
-      #pbnRecolorPanel {
-          width: 280px;
-          flex-shrink: 0;
-          margin-top: 0 !important;
-          max-height: 80vh;
-          overflow-y: auto;
-      }
-      @media (max-width: 900px) {
-          #pbn-flex-wrapper {
-              flex-wrap: wrap;
-          }
-          #pbnRecolorPanel {
-              width: 100%;
-              max-height: 400px;
-          }
-      }
+    const li = document.createElement('li');
+    li.id = 'pbnManualRecolorItem';
+    li.className = 'collection-item';
+    
+    li.innerHTML = `
+      <div class="row" style="margin-bottom:0; display:flex; align-items:center;">
+        <div class="col s8">
+           <label style="font-size:1rem; color:#000; font-weight:500;">🖊️ Recolor Facets</label>
+           <p style="font-size:0.8rem; margin:0; color:#666;">
+             Enable this, then click an area in the <b>output image</b> below.
+           </p>
+        </div>
+        <div class="col s4" style="text-align:right;">
+           <div class="switch">
+            <label>
+              Off
+              <input id="chkManualRecolor" type="checkbox">
+              <span class="lever"></span>
+              On
+            </label>
+          </div>
+        </div>
+      </div>
     `;
-    document.head.appendChild(style);
+
+    // Insert after the Protection Item (or at the end)
+    const ref = $('pbnProtectionItem');
+    if(ref) ref.parentNode.insertBefore(li, ref.nextSibling);
+    else parent.appendChild(li);
+
+    // Event
+    $('chkManualRecolor').addEventListener('change', (e) => {
+        STATE.active = e.target.checked;
+        updateCursor();
+    });
+
+    // Create color picker modal
+    createColorModal();
   }
 
-  // --- COLOR UTILS ---
-  function rgbToHex(r, g, b) {
-    const to = (x) => x.toString(16).padStart(2, '0');
-    return `#${to(r)}${to(g)}${to(b)}`;
-  }
+  function createColorModal() {
+    if($('pbnColorModal')) return;
 
-  function parseColorToHex(color) {
-    if (!color) return null;
-    const c = String(color).trim().toLowerCase();
-    if (!c || c === 'none' || c === 'transparent') return null;
-
-    if (c.startsWith('#')) {
-      if (c.length === 4) return `#${c[1]}${c[1]}${c[2]}${c[2]}${c[3]}${c[3]}`;
-      return c.substring(0, 7);
-    }
-    if (c.startsWith('rgb')) {
-      const parts = c.match(/\d+/g);
-      if (parts && parts.length >= 3) return rgbToHex(Number(parts[0]), Number(parts[1]), Number(parts[2]));
-    }
-    return null;
-  }
-
-  function hexToRgb(hex) {
-    const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
-    return m ? { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) } : null;
-  }
-
-  function rgbToHsl(r, g, b) {
-    r /= 255; g /= 255; b /= 255;
-    const max = Math.max(r, g, b), min = Math.min(r, g, b);
-    let h = 0, s = 0, l = (max + min) / 2;
-    if (max !== min) {
-      const d = max - min;
-      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-      switch (max) {
-        case r: h = (g - b) / d + (g < b ? 6 : 0); break;
-        case g: h = (b - r) / d + 2; break;
-        case b: h = (r - g) / d + 4; break;
-      }
-      h *= 60;
-    }
-    return { h: h < 0 ? h + 360 : h, s, l };
-  }
-
-  function getCategory(h, s, l) {
-    if (l > 0.90) return { order: 1, label: '⚪ White / Light' };
-    if (l < 0.1) return { order: 99, label: '⚫ Black / Dark' };
-    if (s < 0.12) return { order: 90, label: '🌫️ Gray / Neutral' };
-    if (h >= 330 || h < 60) return { order: 10, label: '🟡🔴 Yellow & Red' };
-    if (h >= 60 && h < 170) return { order: 20, label: '🟢 Green & Cyan' };
-    return { order: 30, label: '🔵🟣 Blue & Purple' };
-  }
-
-  // --- CORE LOGIC ---
-  function analyzeOriginalData() {
-    const rawPalette = [];
-    const tiles = $all('#palette .color');
+    const div = document.createElement('div');
+    div.id = 'pbnColorModal';
+    div.className = 'modal';
+    div.style.cssText = 'max-width: 400px; max-height: 80%;';
     
-    tiles.forEach(tile => {
-      const bg = parseColorToHex(tile.style.backgroundColor);
-      let nr = tile.getAttribute('data-orig-id');
-      
-      if (!nr) {
-        nr = tile.innerText.trim();
-        if (nr !== '') {
-            tile.setAttribute('data-orig-id', nr);
-        }
-      }
-
-      if (bg && nr !== '') {
-        if (!tile.hasAttribute('data-orig-bg')) {
-          tile.setAttribute('data-orig-bg', bg);
-        }
-        
-        rawPalette.push({
-          id: nr,
-          origHex: bg
-        });
-      }
-    });
-    return rawPalette;
-  }
-
-  function arePalettesEqual(oldPalette, newRawData) {
-    if (!oldPalette || oldPalette.length === 0) return false;
-    if (oldPalette.length !== newRawData.length) return false;
-
-    const oldMap = new Map();
-    oldPalette.forEach(p => oldMap.set(p.id, p.origHex));
-
-    for (const newItem of newRawData) {
-        if (!oldMap.has(newItem.id)) return false;
-        if (oldMap.get(newItem.id) !== newItem.origHex) return false;
-    }
-    return true;
-  }
-
-  function refreshStateFromDom() {
-    const newRawData = analyzeOriginalData();
-    const isSameImage = arePalettesEqual(STATE.palette, newRawData);
-
-    if (!isSameImage) {
-        STATE.mapping.clear();
-    }
-    STATE.palette = newRawData;
-    performResort();
-  }
-
-  function performResort() {
-    STATE.palette.forEach(item => {
-        const currentHex = STATE.mapping.get(item.origHex) || item.origHex;
-        const rgb = hexToRgb(currentHex) || {r:0,g:0,b:0};
-        const hsl = rgbToHsl(rgb.r, rgb.g, rgb.b);
-        const cat = getCategory(hsl.h, hsl.s, hsl.l);
-
-        item.groupOrder = cat.order;
-        item.groupLabel = cat.label;
-        item.light = hsl.l;
-    });
-
-    STATE.palette.sort((a, b) => {
-      if (a.groupOrder !== b.groupOrder) return a.groupOrder - b.groupOrder;
-      return b.light - a.light;
-    });
-
-    STATE.indexMap.clear();
-    STATE.palette.forEach((item, idx) => {
-      const newNr = idx + 1;
-      STATE.indexMap.set(item.id, newNr);
-      item.newNr = newNr;
-    });
-
-    updateRuntimeInterface();
-    updateNativePalette();
-    updateSvgContent();
-  }
-
-  function toggleHighlight(originalId, originalHex, active) {
-    const svg = getSvg();
-    if (!svg) return;
-
-    const paths = $all(`path[data-orig-fill="${originalHex}"]`, svg);
-    paths.forEach(p => {
-        if (active) p.classList.add('pbn-highlight-path');
-        else p.classList.remove('pbn-highlight-path');
-    });
-
-    const texts = $all(`text[data-orig-text="${originalId}"]`, svg);
-    texts.forEach(t => {
-        if (active) t.classList.add('pbn-highlight-text');
-        else t.classList.remove('pbn-highlight-text');
-    });
-  }
-
-  function updateRuntimeInterface() {
-    const list = $('#pbnRecolorList');
-    if (!list) return;
+    div.innerHTML = `
+      <div class="modal-content">
+        <h5>Select Color</h5>
+        <p>Choose a new color for the selected facet.</p>
+        <div id="pbnColorGrid" style="display:flex; flex-wrap:wrap; gap:5px; justify-content:center;"></div>
+      </div>
+      <div class="modal-footer">
+        <a href="#!" class="modal-close waves-effect waves-green btn-flat">Cancel</a>
+      </div>
+    `;
     
-    const scrollPos = list.scrollTop;
-    list.innerHTML = '';
+    document.body.appendChild(div);
+    // Materialize Modal init
+    if(M && M.Modal) M.Modal.init(div);
+  }
 
-    let lastLabel = '';
+  function updateCursor() {
+    const svgContainer = $('svgContainer');
+    if(!svgContainer) return;
+    svgContainer.style.cursor = STATE.active ? 'pointer' : 'default';
+  }
 
-    STATE.palette.forEach(item => {
-      const currentHex = STATE.mapping.get(item.origHex) || item.origHex;
+  // --- LOGIC ---
 
-      if (item.groupLabel !== lastLabel) {
-        const h = document.createElement('div');
-        h.style.cssText = 'padding:6px 0 2px 0;margin-top:5px;font-size:0.75rem;font-weight:bold;color:#666;border-bottom:1px solid #eee;';
-        h.textContent = item.groupLabel;
-        list.appendChild(h);
-        lastLabel = item.groupLabel;
-      }
+  // We need access to the data (facetResult). We patch createSVG to intercept the reference.
+  function patchProcessManager() {
+      if (typeof window.require !== 'function') return;
 
-      const row = document.createElement('div');
-      row.className = 'pbn-row';
-      row.style.cssText = 'display:flex;gap:6px;align-items:center;margin-bottom:2px;padding:2px 0;border-radius:4px;transition:background 0.2s;';
-
-      row.addEventListener('mouseenter', () => {
-          row.classList.add('pbn-row-hover');
-          toggleHighlight(item.id, item.origHex, true);
+      window.require(['guiprocessmanager'], function(GUI) {
+          if (!GUI || !GUI.GUIProcessManager) return;
+          
+          const originalCreateSVG = GUI.GUIProcessManager.createSVG;
+          
+          GUI.GUIProcessManager.createSVG = async function(facetResult, colorsByIndex, sizeMultiplier, fill, stroke, addColorLabels, fontSize, fontColor, onUpdate) {
+              
+              // STORE DATA
+              STATE.facetResult = facetResult;
+              STATE.colorsByIndex = colorsByIndex;
+              
+              // Run original
+              return await originalCreateSVG.call(this, facetResult, colorsByIndex, sizeMultiplier, fill, stroke, addColorLabels, fontSize, fontColor, onUpdate);
+          };
+          
+          console.log("✅ GUIProcessManager patched for Manual Recolor.");
       });
-      row.addEventListener('mouseleave', () => {
-          row.classList.remove('pbn-row-hover');
-          toggleHighlight(item.id, item.origHex, false);
+  }
+
+  function attachSvgListeners() {
+      const svg = document.querySelector('#svgContainer svg');
+      if(!svg) return;
+
+      // We use event delegation on the SVG because there are thousands of paths
+      svg.addEventListener('click', (e) => {
+          if(!STATE.active) return;
+          
+          const target = e.target;
+          // Check if it is a path (facet) or text (label)
+          // We look for the data-facetId attribute
+          let facetId = target.getAttribute('data-facetId');
+          
+          // If clicking on a label, we often hit <g> or <text>
+          // Unfortunately labels have no DOM ID link in the original code.
+          
+          if (!facetId) {
+             // Click was on text or border
+             return; 
+          }
+          
+          e.preventDefault();
+          e.stopPropagation();
+          
+          openColorPicker(parseInt(facetId));
+      });
+      
+      // Hover effect
+      svg.addEventListener('mouseover', (e) => {
+          if(!STATE.active) return;
+          if(e.target.tagName === 'path' && e.target.hasAttribute('data-facetId')) {
+              e.target.style.opacity = '0.5';
+          }
+      });
+      svg.addEventListener('mouseout', (e) => {
+          if(!STATE.active) return;
+          if(e.target.tagName === 'path') {
+              e.target.style.opacity = '1';
+          }
+      });
+  }
+
+  function openColorPicker(facetId) {
+      STATE.selectedFacetId = facetId;
+      const facet = STATE.facetResult.facets[facetId];
+      if(!facet) return;
+
+      const grid = $('pbnColorGrid');
+      grid.innerHTML = '';
+      
+      const currentColorIdx = facet.color;
+      
+      // Render palette
+      STATE.colorsByIndex.forEach((rgb, idx) => {
+          const colorStr = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+          const div = document.createElement('div');
+          
+          const isSelected = (idx === currentColorIdx);
+          
+          div.style.cssText = `
+            width: 40px; height: 40px; 
+            background-color: ${colorStr};
+            border: ${isSelected ? '3px solid red' : '1px solid #ccc'};
+            cursor: pointer;
+            border-radius: 4px;
+            display: flex; align-items: center; justify-content: center;
+            font-weight: bold;
+            color: ${getContrastYIQ(colorStr)};
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+          `;
+          
+          // Show the "new number" from the palette DOM (safest source)
+          const paletteDom = document.querySelectorAll('#palette .color');
+          let label = idx; // Fallback: index 0..N
+          if(paletteDom && paletteDom[idx]) {
+              label = paletteDom[idx].innerText; // The number the user sees (1..N)
+          }
+          div.innerText = label;
+          
+          div.onclick = () => applyColorChange(facetId, idx);
+          
+          grid.appendChild(div);
       });
 
-      const nr = document.createElement('div');
-      nr.textContent = `#${item.newNr}`;
-      nr.style.cssText = 'font-weight:bold;width:30px;text-align:right;font-size:12px;color:#333;pointer-events:none;';
+      const modal = M.Modal.getInstance($('pbnColorModal'));
+      modal.open();
+  }
 
-      const inp = document.createElement('input');
-      inp.type = 'text';
-      inp.value = currentHex;
-      inp.style.cssText = `
-        width:70px; height:24px; font-size:12px; border:1px solid #ccc; padding:0 4px; margin:0;
-        background-color: ${currentHex};
-        color: ${getContrastYIQ(currentHex)};
-        text-shadow: none;
-      `;
+  function applyColorChange(facetId, newColorIndex) {
+      if(!STATE.facetResult) return;
       
-      inp.addEventListener('change', (e) => {
-        let val = e.target.value.trim();
-        if (/^[0-9a-f]{6}$/i.test(val)) val = '#' + val;
-        
-        const valid = parseColorToHex(val);
-        if (valid) {
-          STATE.mapping.set(item.origHex, valid);
-        } else {
-          STATE.mapping.delete(item.origHex);
-        }
-        
-        requestAnimationFrame(() => {
-            performResort();
-        });
+      // 1. Change data
+      STATE.facetResult.facets[facetId].color = newColorIndex;
+      
+      // 2. Close modal
+      const modal = M.Modal.getInstance($('pbnColorModal'));
+      modal.close();
+      
+      // 3. Re-render SVG
+      window.require(['gui'], function(GUI) {
+         if(GUI && GUI.updateOutput) {
+             GUI.updateOutput();
+             M.toast({html: 'Facet recolored!', classes: 'rounded green'});
+         }
       });
-
-      row.append(nr, inp);
-      list.appendChild(row);
-    });
-
-    list.scrollTop = scrollPos;
   }
 
-  function updateNativePalette() {
-    const container = $('#palette');
-    if (!container) return;
-
-    container.innerHTML = '';
-
-    STATE.palette.forEach(item => {
-      const currentHex = STATE.mapping.get(item.origHex) || item.origHex;
-      
-      const div = document.createElement('div');
-      div.className = 'color tooltipped';
-      div.style.cssText = `
-        float: left; width: 40px; height: 40px; 
-        border: 1px solid #AAA; border-radius: 5px; 
-        text-align: center; padding: 5px; font-weight: 600; margin: 5px;
-        background-color: ${currentHex};
-        color: ${getContrastYIQ(currentHex)};
-        text-shadow: none;
-      `;
-      div.innerText = item.newNr;
-      div.setAttribute('data-tooltip', `Original ID: ${item.id} | Hex: ${currentHex}`);
-      div.setAttribute('data-orig-id', item.id);
-      div.setAttribute('data-orig-bg', item.origHex);
-      
-      container.appendChild(div);
-    });
-    
-    if (window.M && M.Tooltip) M.Tooltip.init($all('.tooltipped'));
-  }
-
-  function updateSvgContent() {
-    const svg = getSvg();
-    if (!svg) return;
-
-    $all('path, polygon, rect, circle', svg).forEach(el => {
-        let hex = el.getAttribute('data-orig-fill');
-        if (!hex) {
-            hex = parseColorToHex(el.getAttribute('fill') || el.style.fill);
-            if (hex) el.setAttribute('data-orig-fill', hex);
-        }
-
-        if (hex) {
-            const newHex = STATE.mapping.get(hex);
-            if (newHex) {
-                el.setAttribute('fill', newHex);
-                el.style.fill = newHex;
-            } else {
-                el.setAttribute('fill', hex);
-                el.style.fill = hex;
-            }
-        }
-    });
-
-    $all('text', svg).forEach(el => {
-        let originalId = el.getAttribute('data-orig-text');
-        
-        if (!originalId) {
-            const textContent = el.textContent.trim();
-            if (/^\d+$/.test(textContent)) {
-                originalId = textContent;
-                el.setAttribute('data-orig-text', originalId);
-            } else {
-                return;
-            }
-        }
-
-        const newNr = STATE.indexMap.get(originalId);
-        if (newNr !== undefined) {
-            el.textContent = newNr;
-        }
-    });
-  }
-
-  function hijackDownloadButton() {
-    const btn = $('#btnDownloadPalettePNG');
-    if (!btn) return;
-
-    const newBtn = btn.cloneNode(true);
-    btn.parentNode.replaceChild(newBtn, btn);
-
-    newBtn.addEventListener('click', (e) => {
-      e.preventDefault();
-      generateCustomPalettePng();
-    });
-  }
-
-  function generateCustomPalettePng() {
-    const canvas = document.createElement("canvas");
-    const items = STATE.palette; 
-
-    const nrOfItemsPerRow = 5; 
-    const nrRows = Math.ceil(items.length / nrOfItemsPerRow);
-    
-    const margin = 20;
-    const cellWidth = 150;
-    const cellHeight = 100;
-
-    canvas.width = margin + nrOfItemsPerRow * (cellWidth + margin);
-    canvas.height = margin + nrRows * (cellHeight + margin);
-    
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "white";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    ctx.font = "bold 24px Arial";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-
-    items.forEach((item, i) => {
-      const currentHex = STATE.mapping.get(item.origHex) || item.origHex;
-      
-      const col = i % nrOfItemsPerRow;
-      const row = Math.floor(i / nrOfItemsPerRow);
-
-      const x = margin + col * (cellWidth + margin);
-      const y = margin + row * (cellHeight + margin);
-
-      ctx.fillStyle = currentHex;
-      ctx.fillRect(x, y, cellWidth, cellHeight - 30);
-      
-      ctx.strokeStyle = "#444";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(x, y, cellWidth, cellHeight - 30);
-
-      ctx.fillStyle = getContrastYIQ(currentHex);
-      ctx.fillText(item.newNr, x + cellWidth / 2, y + (cellHeight - 30) / 2);
-
-      ctx.fillStyle = "black";
-      ctx.font = "14px Arial";
-      ctx.fillText(currentHex, x + cellWidth / 2, y + cellHeight - 10);
-      
-      ctx.font = "bold 24px Arial";
-    });
-
-    const link = document.createElement('a');
-    link.download = 'Sorted_Palette.png';
-    link.href = canvas.toDataURL();
-    link.click();
-  }
-
-  function getContrastYIQ(hexcolor){
-    hexcolor = hexcolor.replace("#", "");
-    var r = parseInt(hexcolor.substr(0,2),16);
-    var g = parseInt(hexcolor.substr(2,2),16);
-    var b = parseInt(hexcolor.substr(4,2),16);
+  // Helper
+  function getContrastYIQ(rgbStr){
+    const parts = rgbStr.match(/\d+/g);
+    if(!parts) return 'black';
+    const r = parseInt(parts[0]);
+    const g = parseInt(parts[1]);
+    const b = parseInt(parts[2]);
     var yiq = ((r*299)+(g*587)+(b*114))/1000;
     return (yiq >= 128) ? 'black' : 'white';
   }
 
-  function ensureLayoutAndPanel() {
-    // 1. Check if panel already exists
-    if ($('#pbnRecolorPanel')) return;
-
-    const svgContainer = $('#svgContainer');
-    if (!svgContainer) return;
-
-    // 2. Identify parent wrapper
-    // The original structure is <div class="col s12"><div id="svgContainer">...</div></div>
-    // We want to hijack that "col s12" to be a flex container.
-    const parent = svgContainer.parentElement;
-    
-    // 3. Create a wrapper only if not already done
-    let wrapper = $('#pbn-flex-wrapper');
-    if (!wrapper) {
-        wrapper = document.createElement('div');
-        wrapper.id = 'pbn-flex-wrapper';
-        // Move svgContainer into wrapper
-        parent.insertBefore(wrapper, svgContainer);
-        wrapper.appendChild(svgContainer);
-    }
-
-    // 4. Create Panel
-    const panel = document.createElement('div');
-    panel.id = 'pbnRecolorPanel';
-    panel.className = 'card-panel';
-    panel.style.cssText = 'padding:15px; background:#fafafa; border-left:5px solid #26a69a;';
-    
-    panel.innerHTML = `
-      <h5 style="margin-top:0;font-size:1.2rem;">🎨 Colors</h5>
-      <p style="font-size:0.8rem;color:#666;">
-        Colors sorted (White -> Black).<br>
-        <i>Hover to highlight.</i>
-      </p>
-      <div id="pbnRecolorList" style="padding-right:5px;"></div>
-    `;
-
-    // 5. Append Panel next to SVG
-    wrapper.appendChild(panel);
-  }
-
+  // --- INIT ---
   function init() {
-    injectStyles();
-    
-    const container = $('#svgContainer');
-    if (container) {
-      const obs = new MutationObserver((mutations) => {
-        const hasSvg = mutations.some(m => Array.from(m.addedNodes).some(n => n.nodeName === 'svg'));
-        if (hasSvg) {
-          setTimeout(() => {
-            refreshStateFromDom(); 
-            hijackDownloadButton();
-          }, 500);
-        }
-      });
-      obs.observe(container, { childList: true });
-    }
-
-    // Wait slightly for DOM to settle, then build layout
-    setTimeout(ensureLayoutAndPanel, 500);
-    
-    if (getSvg()) {
-        refreshStateFromDom();
-        hijackDownloadButton();
-    }
+      setTimeout(injectUI, 1000);
+      setTimeout(patchProcessManager, 2000);
+      
+      // SVG listeners must be reattached when the SVG is rebuilt
+      const container = $('svgContainer');
+      if(container) {
+          const obs = new MutationObserver(() => {
+              attachSvgListeners();
+              updateCursor();
+          });
+          obs.observe(container, {childList: true});
+      }
   }
 
   if (document.readyState === 'loading') {

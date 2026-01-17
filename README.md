@@ -1,5 +1,5 @@
 # Paint by numbers generator
-Generate paint by number images (vectorized with SVG) from any input image.
+Generate paint by number images (vectorized with SVG) from any input image. Orginal from https://github.com/drake7707/paintbynumbersgenerator. Trying to make some some changes.
 
 *** This project was a proof of concept for fun back in the day, it is not being actively maintained but feel free to fork and make your own changes.  ***
 

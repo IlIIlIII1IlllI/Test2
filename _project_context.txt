@@ -13,6 +13,8 @@ PROJECT STRUCTURE:
     report.20260112.225841.45404.0.001.json
     report.20260112.225848.19388.0.001.json
     report.20260117.142506.10308.0.001.json
+    runtime-manual-recolor.js
+    runtime-protection.js
     runtime-recolor.js
     runtime-target-size.js
     Start-PaintByNumbers.bat
@@ -505,6 +507,8 @@ node_modules
 <script src="laser-export.js"></script>
 <script src="runtime-target-size.js"></script>
 <script src="runtime-recolor.js"></script>
+<script src="runtime-protection.js"></script>
+<script src="runtime-manual-recolor.js"></script>
 </body>
 
 </html>
@@ -514,14 +518,13 @@ node_modules
 
 --- START FILE: .\laser-export.js ---
 /*
- * PaintByNumbersGenerator – Laser export runtime patch (v4)
+ * PaintByNumbersGenerator – Laser export runtime patch (v9.4 - Travel Optimizer)
  *
- * v4 Fixes:
- *  - Preserve adaptive size + centering by baking the FULL transform chain
- *    (all ancestor transforms, including those created when flattening nested <svg>).
- *  - Keep pretty single-line digits.
- *  - Export preview.svg and laser.svg.
- *  - For laser.svg: remove fills, force strokes to #000.
+ * FIXES & FEATURES:
+ * - True Deduplication: Every border edge is hashed. Duplicates are deleted.
+ * - Path Stitching: Connects touching edges into long continuous paths (fewer Laser ON/OFFs).
+ * - Travel Optimization: Sorts paths using "Nearest Neighbor" to minimize rapid moves.
+ * - Stable Loading: Output is chunked to prevent LaserGRBL XML parsing errors.
  */
 
 (function () {
@@ -529,44 +532,62 @@ node_modules
 
   var DEFAULT_STROKE_WIDTH = 0.35;
   var FORCE_STROKE_COLOR = "#000";
+  var BATCH_SIZE = 50; // Smaller chunks for safety with complex stitched paths
 
-  // Pretty single-line digits (0..10 font units)
+  // V8 Simplex Digits
   var DIGITS = {
-    "0": { w: 8.5, s: [
-      [[4.25,1],[6.6,2.0],[7.4,4.4],[6.7,7.9],[4.25,9],[1.9,8.0],[1.1,5.6],[1.8,2.1],[4.25,1]]
-    ]},
-    "1": { w: 6.0, s: [
-      [[2.0,3.0],[3.5,1.5],[3.5,9.0]],
-      [[2.2,9.0],[4.8,9.0]]
-    ]},
-    "2": { w: 8.5, s: [
-      [[1.4,2.7],[2.5,1.6],[5.7,1.6],[7.0,2.8],[6.6,4.2],[1.6,9.0],[7.2,9.0]]
-    ]},
-    "3": { w: 8.5, s: [
-      [[1.6,2.2],[2.7,1.5],[5.8,1.5],[7.1,2.7],[6.1,4.6],[4.4,5.0],[6.2,5.4],[7.1,7.3],[5.8,8.7],[2.7,8.7],[1.6,8.0]]
-    ]},
-    "4": { w: 8.5, s: [
-      [[6.9,9.0],[6.9,1.5]],
-      [[1.4,6.4],[7.2,6.4]],
-      [[1.4,6.4],[6.1,1.5]]
-    ]},
-    "5": { w: 8.5, s: [
-      [[7.0,1.6],[2.1,1.6],[2.1,4.9],[5.8,4.9],[7.2,6.4],[6.0,8.7],[2.7,8.7],[1.6,7.8]]
-    ]},
-    "6": { w: 8.5, s: [
-      [[6.8,2.2],[5.6,1.5],[2.9,1.5],[1.6,2.9],[1.6,7.3],[2.9,8.7],[5.6,8.7],[6.9,7.4],[6.9,6.1],[5.7,4.9],[2.9,4.9],[1.6,6.1]]
-    ]},
-    "7": { w: 8.5, s: [
-      [[1.4,1.6],[7.2,1.6],[3.3,9.0]]
-    ]},
-    "8": { w: 8.5, s: [
-      [[4.25,4.8],[6.2,3.8],[6.9,2.6],[5.8,1.5],[2.7,1.5],[1.6,2.6],[2.3,3.8],[4.25,4.8],[6.2,5.8],[6.9,7.2],[5.8,8.7],[2.7,8.7],[1.6,7.2],[2.3,5.8],[4.25,4.8]]
-    ]},
-    "9": { w: 8.5, s: [
-      [[6.9,4.4],[5.6,3.2],[2.9,3.2],[1.6,4.5],[1.6,5.8],[2.9,7.1],[5.6,7.1],[6.9,5.8],[6.9,2.9],[5.6,1.5],[2.9,1.5],[1.6,2.5]]
-    ]},
-    " ": { w: 4.0, s: [] }
+    "0": { w: 7, s: [[[2,9], [1,8], [1,2], [2,1], [5,1], [6,2], [6,8], [5,9], [2,9]]] },
+    "1": { w: 5, s: [[[2,2], [3.5,1], [3.5,9]], [[2,9], [5,9]]] },
+    "2": { w: 7, s: [[[1,3], [2,1], [5,1], [6,2], [6,4], [1,9], [7,9]]] },
+    "3": { w: 7, s: [[[1,2], [2,1], [5,1], [6,2], [6,4], [4,5], [6,6], [6,8], [5,9], [2,9], [1,8]]] },
+    "4": { w: 7, s: [[[5,9], [5,1], [1,6], [7,6]]] }, 
+    "5": { w: 7, s: [[[6,1], [1.5,1], [1.5,4], [2,3.5], [5,3.5], [6,4.5], [6,8], [5,9], [2,9], [1,8]]] },
+    "6": { w: 7, s: [[[5,1], [2,1], [1,2], [1,8], [2,9], [5,9], [6,8], [6,6], [5,5], [1.5,5]]] },
+    "7": { w: 7, s: [[[1,1], [6,1], [3,9]]] },
+    "8": { w: 7, s: [[[2,1], [5,1], [6,2], [6,4], [5,5], [2,5], [1,6], [1,8], [2,9], [5,9], [6,8], [6,6], [5,5], [2,4], [1,2], [2,1]]] },
+    "9": { w: 7, s: [[[5.5,5], [2,5], [1,4], [1,2], [2,1], [5,1], [6,2], [6,8], [5,9], [2,9]]] },
+    " ": { w: 4, s: [] }
   };
+
+  // --- Helpers ---
+  function downloadTextFile(filename, text) {
+    var preface = '<?xml version="1.0" standalone="no"?>\r\n';
+    var blob = new Blob([preface, text], { type: "image/svg+xml;charset=utf-8" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.style.display = 'none';
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+  }
+
+  function getCurrentSvgMarkup() {
+    var svg = document.querySelector("#svgContainer svg");
+    if (!svg) return null;
+    if (window.__pbnGetTargetSizeMm) {
+        const size = window.__pbnGetTargetSizeMm();
+        if(size && size.w && size.h) {
+            svg.setAttribute('width', size.w + 'mm');
+            svg.setAttribute('height', size.h + 'mm');
+        }
+    }
+    if(!svg.getAttribute("xmlns")) svg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    return svg.outerHTML;
+  }
+
+  function parseNumberAttr(el, name, fallback) {
+    var v = el.getAttribute(name);
+    if (v == null) return fallback;
+    var n = parseFloat(v);
+    return isFinite(n) ? n : fallback;
+  }
+
+  function getStrokeWidthFromUI() {
+    var el = document.getElementById('txtSingleLineStrokeWidth');
+    return el ? (parseFloat(el.value) || DEFAULT_STROKE_WIDTH) : DEFAULT_STROKE_WIDTH;
+  }
 
   function strokeTextToPath(text, letterSpacing) {
     var height = 10;
@@ -590,26 +611,24 @@ node_modules
     return { segs: parts, width: width, height: height };
   }
 
-  // ---------- matrix math (SVG affine [a,b,c,d,e,f]) ----------
+  // --- Math ---
   function matMul(a, b) {
     return [
-      a[0]*b[0] + a[2]*b[1],
-      a[1]*b[0] + a[3]*b[1],
-      a[0]*b[2] + a[2]*b[3],
-      a[1]*b[2] + a[3]*b[3],
-      a[0]*b[4] + a[2]*b[5] + a[4],
-      a[1]*b[4] + a[3]*b[5] + a[5]
+      a[0]*b[0] + a[2]*b[1], a[1]*b[0] + a[3]*b[1],
+      a[0]*b[2] + a[2]*b[3], a[1]*b[2] + a[3]*b[3],
+      a[0]*b[4] + a[2]*b[5] + a[4], a[1]*b[4] + a[3]*b[5] + a[5]
     ];
   }
+  
   function matApply(m, x, y) {
+    if (!m) return [x, y];
     return [m[0]*x + m[2]*y + m[4], m[1]*x + m[3]*y + m[5]];
   }
+
   function matTranslate(tx, ty) { return [1,0,0,1,tx,ty]; }
   function matScale(sx, sy) { return [sx,0,0,sy,0,0]; }
 
   function parseTransformList(t) {
-    // Supports translate(x,y), scale(sx[,sy])
-    // (enough for this app's labels)
     var m = [1,0,0,1,0,0];
     if (!t) return m;
     var re = /(translate|scale)\s*\(([^)]*)\)/ig;
@@ -618,23 +637,18 @@ node_modules
       var fn = match[1].toLowerCase();
       var args = match[2].trim().split(/[\s,]+/).filter(Boolean).map(parseFloat);
       if (fn === "translate") {
-        var tx = isFinite(args[0]) ? args[0] : 0;
-        var ty = isFinite(args[1]) ? args[1] : 0;
-        m = matMul(m, matTranslate(tx, ty));
+        m = matMul(m, matTranslate(args[0]||0, args[1]||0));
       } else if (fn === "scale") {
-        var sx = isFinite(args[0]) ? args[0] : 1;
-        var sy = isFinite(args[1]) ? args[1] : sx;
-        m = matMul(m, matScale(sx, sy));
+        m = matMul(m, matScale(args[0]||1, args[1]||args[0]||1));
       }
     }
     return m;
   }
 
   function cumulativeTransformMatrix(el, stopAt) {
-    // Build list of matrices from el up to (but excluding) stopAt, then multiply from root->leaf.
     var mats = [];
     var cur = el;
-    while (cur && cur !== stopAt) {
+    while (cur && cur !== stopAt && cur) {
       if (cur.getAttribute) {
         var t = cur.getAttribute('transform');
         if (t) mats.push(parseTransformList(t));
@@ -648,35 +662,8 @@ node_modules
     return M;
   }
 
-  // ---------- SVG helpers ----------
-  function downloadTextFile(filename, text) {
-    var preface = "<?xml version=\"1.0\" standalone=\"no\"?>\r\n";
-    var blob = new Blob([preface, text], { type: "image/svg+xml;charset=utf-8" });
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
-  }
+  // --- Optimization Engine v9.4 ---
 
-  function getCurrentSvgMarkup() {
-    var svg = document.querySelector("#svgContainer svg");
-    if (!svg) return null;
-    svg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
-    return svg.outerHTML;
-  }
-
-  function parseNumberAttr(el, name, fallback) {
-    var v = el.getAttribute(name);
-    if (v == null) return fallback;
-    var n = parseFloat(v);
-    return isFinite(n) ? n : fallback;
-  }
-
-  // Flatten nested <svg> for maximum compatibility.
   function flattenNestedSvg(doc) {
     var root = doc.documentElement;
     var allSvgs = Array.prototype.slice.call(root.getElementsByTagName("svg"));
@@ -691,22 +678,21 @@ node_modules
       var y = parseNumberAttr(svg, "y", 0);
       var w = parseNumberAttr(svg, "width", 0);
       var h = parseNumberAttr(svg, "height", 0);
-
-      var vb = (svg.getAttribute("viewBox") || "").trim().split(/[\s,]+/).map(parseFloat);
-      var vbMinX = (vb.length === 4 && isFinite(vb[0])) ? vb[0] : 0;
-      var vbMinY = (vb.length === 4 && isFinite(vb[1])) ? vb[1] : 0;
-      var vbW = (vb.length === 4 && isFinite(vb[2])) ? vb[2] : (w || 0);
-      var vbH = (vb.length === 4 && isFinite(vb[3])) ? vb[3] : (h || 0);
+      var vbAttr = svg.getAttribute("viewBox");
+      var vb = vbAttr ? vbAttr.trim().split(/[\s,]+/).map(parseFloat) : [];
+      
+      var vbMinX = (vb.length === 4) ? vb[0] : 0;
+      var vbMinY = (vb.length === 4) ? vb[1] : 0;
+      var vbW = (vb.length === 4) ? vb[2] : (w || 0);
+      var vbH = (vb.length === 4) ? vb[3] : (h || 0);
       if (!w) w = vbW;
       if (!h) h = vbH;
 
-      var par = (svg.getAttribute("preserveAspectRatio") || "xMidYMid meet").toLowerCase();
-      var meet = par.indexOf("meet") >= 0;
-      var scaleX = vbW ? (w / vbW) : 1;
-      var scaleY = vbH ? (h / vbH) : 1;
-      var s = meet ? Math.min(scaleX, scaleY) : 1;
-      var dx = meet ? (w - vbW * s) / 2 : 0;
-      var dy = meet ? (h - vbH * s) / 2 : 0;
+      var scaleX = (vbW) ? (w / vbW) : 1;
+      var scaleY = (vbH) ? (h / vbH) : 1;
+      var s = Math.min(scaleX, scaleY); 
+      var dx = (w - vbW * s) / 2;
+      var dy = (h - vbH * s) / 2;
 
       var existing = (svg.getAttribute("transform") || "").trim();
       var tMap = "translate(" + x + "," + y + ") translate(" + dx + "," + dy + ") scale(" + s + ") translate(" + (-vbMinX) + "," + (-vbMinY) + ")";
@@ -720,7 +706,6 @@ node_modules
     }
   }
 
-  // Convert numeric <text> (if any) to pretty path strokes; bake directly to absolute coords.
   function convertTextNodesToLabelPaths(doc, strokeWidth) {
     var svgEl = doc.documentElement;
     var texts = Array.prototype.slice.call(svgEl.getElementsByTagName("text"));
@@ -732,19 +717,14 @@ node_modules
       var x = parseNumberAttr(t, "x", 0);
       var y = parseNumberAttr(t, "y", 0);
       var fontSize = parseNumberAttr(t, "font-size", 12);
-      var fill = t.getAttribute("fill") || "black";
-
-      var letterSpacing = (label.length > 1) ? 0.9 : 1.4;
+      
+      var letterSpacing = (label.length > 1) ? 1.0 : 1.5; 
       var p = strokeTextToPath(label, letterSpacing);
       var scale = fontSize / p.height;
 
-      var anchor = (t.getAttribute("text-anchor") || "start").toLowerCase();
       var scaledW = p.width * scale;
-      var xOffset = (anchor === "middle") ? (-scaledW/2) : (anchor === "end" ? -scaledW : 0);
-
-      var dominant = (t.getAttribute("dominant-baseline") || "").toLowerCase();
-      var scaledH = p.height * scale;
-      var yOffset = (dominant.indexOf("middle") >= 0 || dominant.indexOf("central") >= 0) ? (-scaledH/2) : (-scaledH*0.78);
+      var xOffset = (-scaledW/2); 
+      var yOffset = (-p.height * scale * 0.5);
 
       var dparts = [];
       for (var si = 0; si < p.segs.length; si++) {
@@ -758,220 +738,588 @@ node_modules
       var path = doc.createElementNS("http://www.w3.org/2000/svg", "path");
       path.setAttribute("d", dparts.join(" "));
       path.setAttribute("fill", "none");
-      path.setAttribute("stroke", fill);
+      path.setAttribute("stroke", FORCE_STROKE_COLOR);
       path.setAttribute("stroke-width", String(strokeWidth));
-      path.setAttribute("vector-effect", "non-scaling-stroke");
-      path.setAttribute("stroke-linecap", "round");
-      path.setAttribute("stroke-linejoin", "round");
-      path.setAttribute("data-label", label);
-
+      path.setAttribute("data-label", "true"); 
+      
       t.parentNode.replaceChild(path, t);
     }
   }
 
-  // Bake ALL transforms affecting label paths into coordinates.
-  // This preserves adaptive scaling/centering from the original layout.
-  function bakeAllLabelPathTransforms(doc) {
-    var svgEl = doc.documentElement;
-
-    // Process all paths inside label groups first.
-    var labelPaths = Array.prototype.slice.call(svgEl.querySelectorAll('g.label path'));
-
-    for (var i = 0; i < labelPaths.length; i++) {
-      var pth = labelPaths[i];
-      var d = pth.getAttribute('d') || '';
-      if (!d) continue;
-
-      // Only bake simple M/L paths (our digits or converted ones)
-      if (!/^[\sML0-9.,-]+$/i.test(d)) continue;
-
-      // Compute full cumulative matrix from this path up to root svg
-      var M = cumulativeTransformMatrix(pth, svgEl);
-
-      // Parse tokens
+  function bakePathData(d, matrix) {
+      if (!d) return null;
       var tokens = d.replace(/,/g, ' ').trim().split(/\s+/);
-      var out = [];
       var idx = 0;
+      var out = [];
+      // Calculate BBox for sorting
+      var cx=0, cy=0; // needed for implicit relative moves if any
+      var points = [];
+
+      function applyM(x, y) { return matApply(matrix, x, y); }
+
       while (idx < tokens.length) {
-        var cmd = tokens[idx++];
-        if (cmd !== 'M' && cmd !== 'L' && cmd !== 'm' && cmd !== 'l') break;
-        var x = parseFloat(tokens[idx++]);
-        var y = parseFloat(tokens[idx++]);
-        if (!isFinite(x) || !isFinite(y)) break;
-        var pt = matApply(M, x, y);
-        out.push(cmd.toUpperCase() + ' ' + pt[0].toFixed(3) + ' ' + pt[1].toFixed(3));
+          var cmd = tokens[idx++];
+          if (cmd.toUpperCase() === 'M' || cmd.toUpperCase() === 'L') {
+              var nx = parseFloat(tokens[idx++]);
+              var ny = parseFloat(tokens[idx++]);
+              var pt = applyM(nx, ny);
+              out.push(cmd.toUpperCase() + ' ' + pt[0].toFixed(3) + ' ' + pt[1].toFixed(3));
+              points.push(pt);
+          } else if (cmd.toUpperCase() === 'Q') {
+              var c1x = parseFloat(tokens[idx++]);
+              var c1y = parseFloat(tokens[idx++]);
+              var nx = parseFloat(tokens[idx++]);
+              var ny = parseFloat(tokens[idx++]);
+              var cp = applyM(c1x, c1y);
+              var pt = applyM(nx, ny);
+              out.push('Q ' + cp[0].toFixed(3) + ' ' + cp[1].toFixed(3) + ' ' + pt[0].toFixed(3) + ' ' + pt[1].toFixed(3));
+              points.push(pt);
+          } else if (cmd.toUpperCase() === 'Z') {
+              out.push('Z');
+          }
+      }
+      
+      // Calculate Centroid of this label for TSP sorting
+      var midX = 0, midY = 0;
+      if (points.length > 0) {
+          points.forEach(p => { midX += p[0]; midY += p[1]; });
+          midX /= points.length;
+          midY /= points.length;
       }
 
-      if (out.length > 0) {
-        pth.setAttribute('d', out.join(' '));
-        pth.removeAttribute('transform');
-        pth.setAttribute('stroke', FORCE_STROKE_COLOR);
-        pth.setAttribute('fill', 'none');
-        pth.setAttribute('vector-effect', 'non-scaling-stroke');
-        pth.setAttribute('stroke-linecap', 'round');
-        pth.setAttribute('stroke-linejoin', 'round');
-        pth.removeAttribute('style');
-
-        // Move path to root to avoid any remaining transforms in ancestors.
-        svgEl.appendChild(pth);
-      }
-    }
-
-    // Remove now-empty label groups
-    var labelGroups = Array.prototype.slice.call(svgEl.querySelectorAll('g.label'));
-    for (var j = 0; j < labelGroups.length; j++) {
-      if (labelGroups[j] && labelGroups[j].parentNode) labelGroups[j].parentNode.removeChild(labelGroups[j]);
-    }
+      return { d: out.join(' '), center: {x: midX, y: midY} };
   }
 
-  function prepareSvgForLaser(doc) {
-    var svgEl = doc.documentElement;
-
-    // remove remaining text
-    var texts = Array.prototype.slice.call(svgEl.getElementsByTagName('text'));
-    for (var i = 0; i < texts.length; i++) {
-      if (texts[i] && texts[i].parentNode) texts[i].parentNode.removeChild(texts[i]);
-    }
-
-    function isNone(v) {
-      if (v == null) return true;
-      var t = String(v).trim().toLowerCase();
-      return t === '' || t === 'none';
-    }
-
-    var nodes = svgEl.querySelectorAll('path, rect, circle, ellipse, polygon, polyline');
-    for (var ni = nodes.length - 1; ni >= 0; ni--) {
-      var el = nodes[ni];
-      var fill = el.getAttribute('fill');
-      var stroke = el.getAttribute('stroke');
-      var sw = parseFloat(el.getAttribute('stroke-width') || '1');
-      if (!isFinite(sw)) sw = 1;
-
-      var style = el.getAttribute('style') || '';
-      if (isNone(stroke)) {
-        var ms = style.match(/stroke\s*:\s*([^;]+)\s*;?/i);
-        if (ms) stroke = ms[1].trim();
-      }
-      if (isNone(fill)) {
-        var mf = style.match(/fill\s*:\s*([^;]+)\s*;?/i);
-        if (mf) fill = mf[1].trim();
-      }
-
-      var hasStroke = !isNone(stroke) && sw > 0;
-      var hasFill = !isNone(fill);
-
-      if (hasFill && !hasStroke) {
-        if (el.parentNode) el.parentNode.removeChild(el);
-        continue;
-      }
-      if (hasFill && hasStroke) el.setAttribute('fill', 'none');
-      if (hasStroke) {
-        el.setAttribute('stroke', FORCE_STROKE_COLOR);
-        el.setAttribute('vector-effect', 'non-scaling-stroke');
-        el.removeAttribute('style');
-      }
-    }
-
-    svgEl.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  function getSegmentHash(p1, p2, cp) {
+     var x1 = p1[0].toFixed(2), y1 = p1[1].toFixed(2);
+     var x2 = p2[0].toFixed(2), y2 = p2[1].toFixed(2);
+     var s1 = x1 + ',' + y1;
+     var s2 = x2 + ',' + y2;
+     var sc = cp ? '|' + cp[0].toFixed(2) + ',' + cp[1].toFixed(2) : '';
+     // Canonical form: smaller coord string first
+     return (s1 < s2) ? (s1 + '-' + s2 + sc) : (s2 + '-' + s1 + sc);
   }
 
-  function getStrokeWidthFromUI() {
-    var el = document.getElementById('txtSingleLineStrokeWidth');
-    if (!el) return DEFAULT_STROKE_WIDTH;
-    var v = parseFloat(el.value);
-    return isFinite(v) ? v : DEFAULT_STROKE_WIDTH;
+  function parseAndDecomposeBorders(d, matrix) {
+      var tokens = d.replace(/,/g, ' ').trim().split(/\s+/);
+      var idx = 0;
+      var cx = 0, cy = 0;
+      var sx = 0, sy = 0;
+      var edges = [];
+
+      function applyM(x, y) { return matApply(matrix, x, y); }
+
+      while (idx < tokens.length) {
+          var cmd = tokens[idx++];
+          if (cmd.toUpperCase() === 'M') {
+              var pt = applyM(parseFloat(tokens[idx++]), parseFloat(tokens[idx++]));
+              cx = pt[0]; cy = pt[1];
+              sx = cx; sy = cy;
+          } else if (cmd.toUpperCase() === 'L') {
+              var pt = applyM(parseFloat(tokens[idx++]), parseFloat(tokens[idx++]));
+              edges.push({ type:'L', p1:[cx,cy], p2:[pt[0],pt[1]] });
+              cx = pt[0]; cy = pt[1];
+          } else if (cmd.toUpperCase() === 'Q') {
+              var cp = applyM(parseFloat(tokens[idx++]), parseFloat(tokens[idx++]));
+              var pt = applyM(parseFloat(tokens[idx++]), parseFloat(tokens[idx++]));
+              edges.push({ type:'Q', p1:[cx,cy], p2:[pt[0],pt[1]], c:[cp[0],cp[1]] });
+              cx = pt[0]; cy = pt[1];
+          } else if (cmd.toUpperCase() === 'Z') {
+              if (Math.abs(cx-sx)>0.01 || Math.abs(cy-sy)>0.01) {
+                  edges.push({ type:'L', p1:[cx,cy], p2:[sx,sy] });
+              }
+              cx = sx; cy = sy;
+          }
+      }
+      return edges;
   }
 
-  function buildLaserSvg(svgMarkup) {
-    var parser = new DOMParser();
-    var doc = parser.parseFromString(svgMarkup, 'image/svg+xml');
+  // --- Advanced Optimizers ---
 
-    // Step 0: flatten nested svg first, so their transforms become explicit <g transform>
-    flattenNestedSvg(doc);
+  /**
+   * Stitches loose segments into long continuous chains.
+   */
+  function stitchEdges(edges) {
+      // 1. Build Adjacency Map
+      // Key: "x.xx,y.yy" -> Array of Edges attached to this point
+      var adj = {};
+      
+      function k(pt) { return pt[0].toFixed(2) + ',' + pt[1].toFixed(2); }
+      
+      function addToAdj(key, edge) {
+          if (!adj[key]) adj[key] = [];
+          adj[key].push(edge);
+      }
 
-    // Step 1: Convert remaining <text> (if any)
-    convertTextNodesToLabelPaths(doc, getStrokeWidthFromUI());
+      edges.forEach(e => {
+          e.visited = false;
+          // Store original reference and direction implied by connection
+          addToAdj(k(e.p1), e);
+          addToAdj(k(e.p2), e);
+      });
 
-    // Step 2: Bake all transforms for label paths (adaptive scaling/centering preserved)
-    bakeAllLabelPathTransforms(doc);
+      var chains = [];
 
-    // Step 3: remove fills, normalize
-    prepareSvgForLaser(doc);
+      // 2. Iterate all edges to build chains
+      for (var i = 0; i < edges.length; i++) {
+          var startEdge = edges[i];
+          if (startEdge.visited) continue;
 
-    return new XMLSerializer().serializeToString(doc.documentElement);
+          // Start a new chain
+          var chain = [];
+          var current = startEdge;
+          var headPoint = current.p1; 
+          var tailPoint = current.p2;
+          
+          current.visited = true;
+          // Ensure first segment orientation is P1->P2 in logical chain (we assume forward)
+          // Store segment and a flag if it needs flipping
+          chain.push({ edge: current, reverse: false });
+
+          // Grow Tail (Forward)
+          var growing = true;
+          while (growing) {
+              var candidates = adj[k(tailPoint)];
+              var foundNext = false;
+              if (candidates) {
+                  for (var c = 0; c < candidates.length; c++) {
+                      var cand = candidates[c];
+                      if (!cand.visited) {
+                          cand.visited = true;
+                          
+                          // Determine direction. 
+                          // Does cand start or end at tailPoint?
+                          var distToP1 = Math.abs(cand.p1[0] - tailPoint[0]) + Math.abs(cand.p1[1] - tailPoint[1]);
+                          var isNaturalDir = (distToP1 < 0.1); 
+                          
+                          chain.push({ edge: cand, reverse: !isNaturalDir });
+                          tailPoint = isNaturalDir ? cand.p2 : cand.p1;
+                          
+                          foundNext = true;
+                          break; 
+                      }
+                  }
+              }
+              if (!foundNext) growing = false;
+          }
+
+          // Grow Head (Backward)
+          // We look for segments connected to headPoint (original p1)
+          growing = true;
+          while (growing) {
+              var candidates = adj[k(headPoint)];
+              var foundPrev = false;
+              if (candidates) {
+                  for (var c = 0; c < candidates.length; c++) {
+                      var cand = candidates[c];
+                      if (!cand.visited) {
+                          cand.visited = true;
+                          
+                          // We are extending BACKWARDS from headPoint.
+                          // So if cand ends at headPoint (cand.p2 == headPoint), it is natural direction A->B->Head.
+                          // If cand starts at headPoint, it is reverse direction Head->B->A (conceptually).
+                          
+                          var distToP2 = Math.abs(cand.p2[0] - headPoint[0]) + Math.abs(cand.p2[1] - headPoint[1]);
+                          var isNaturalDir = (distToP2 < 0.1);
+
+                          // Prepend
+                          chain.unshift({ edge: cand, reverse: !isNaturalDir });
+                          
+                          // Update new Head
+                          headPoint = isNaturalDir ? cand.p1 : cand.p2;
+                          
+                          foundPrev = true;
+                          break;
+                      }
+                  }
+              }
+              if (!foundPrev) growing = false;
+          }
+
+          chains.push({
+             segments: chain,
+             startPt: headPoint,
+             endPt: tailPoint
+          });
+      }
+      return chains;
   }
 
+  /**
+   * Sorts chains (polylines) using Greedy Nearest Neighbor (Travel Optimization)
+   */
+  function sortChains(chains) {
+      if (chains.length === 0) return [];
+      
+      var sorted = [];
+      var currentPos = [0, 0]; // Laser starts at origin
+      var unvisited = new Set(chains);
+      
+      // Safety brake for huge files
+      var count = 0;
+      var limit = chains.length + 1;
+
+      while (unvisited.size > 0 && count < limit) {
+          count++;
+          
+          var nearest = null;
+          var minDist = Infinity;
+          var reversed = false;
+          
+          // Find closest start or end of any remaining chain
+          // (Since we are in browser JS, naive O(N) scan per step is slow for 50k items.
+          // BUT: 50k edges usually reduce to < 2k chains. O(N^2) for N=2000 is 4M ops, which is fine (~50ms).)
+          
+          for (var chain of unvisited) {
+              // Dist to Start
+              var dStart = Math.abs(chain.startPt[0] - currentPos[0]) + Math.abs(chain.startPt[1] - currentPos[1]);
+              
+              if (dStart < minDist) {
+                  minDist = dStart;
+                  nearest = chain;
+                  reversed = false; // We play it start->end
+              }
+              
+              // Optimization: Also check end point? If we play it reversed?
+              // Yes, LaserGRBL supports this better if paths are contiguous.
+              var dEnd = Math.abs(chain.endPt[0] - currentPos[0]) + Math.abs(chain.endPt[1] - currentPos[1]);
+              if (dEnd < minDist) {
+                  minDist = dEnd;
+                  nearest = chain;
+                  reversed = true; // We play it end->start
+              }
+          }
+          
+          if (nearest) {
+              unvisited.delete(nearest);
+              // Store reversal decision in the chain object for the renderer
+              nearest.renderReverse = reversed; 
+              
+              sorted.push(nearest);
+              currentPos = reversed ? nearest.startPt : nearest.endPt;
+          } else {
+              break; 
+          }
+      }
+      return sorted;
+  }
+  
+  function sortLabels(labels) {
+      // Same logic for labels (Point-based TSP)
+      if (labels.length === 0) return [];
+      
+      var sorted = [];
+      var currentPos = [0, 0];
+      var unvisited = new Set(labels);
+      
+      var count = 0;
+      while (unvisited.size > 0 && count++ < labels.length + 1) {
+          var nearest = null;
+          var minDist = Infinity;
+          
+          for (var l of unvisited) {
+              var d = Math.abs(l.center.x - currentPos[0]) + Math.abs(l.center.y - currentPos[1]);
+              if (d < minDist) {
+                  minDist = d;
+                  nearest = l;
+              }
+          }
+          
+          if(nearest) {
+              unvisited.delete(nearest);
+              sorted.push(nearest);
+              currentPos = [nearest.center.x, nearest.center.y];
+          } else break;
+      }
+      return sorted;
+  }
+
+  function optimizeGeometry(svgString) {
+      console.log("Parsing SVG...");
+      var parser = new DOMParser();
+      var doc = parser.parseFromString(svgString, 'image/svg+xml');
+      
+      flattenNestedSvg(doc);
+      convertTextNodesToLabelPaths(doc, getStrokeWidthFromUI());
+      
+      var labels = [];
+      var borderEdges = [];
+      var uniqueEdgeHashes = new Set();
+      var dedupCount = 0;
+
+      var elements = Array.from(doc.querySelectorAll('path, rect, circle, polygon, polyline'));
+
+      elements.forEach(function(el) {
+          var isLabel = el.getAttribute('data-label') === 'true';
+          
+          var hasFill = (el.getAttribute('fill') && el.getAttribute('fill') !== 'none');
+          var hasStroke = (el.getAttribute('stroke') && el.getAttribute('stroke') !== 'none');
+          
+          var M = cumulativeTransformMatrix(el, doc.documentElement);
+          var d = el.getAttribute('d');
+          
+          if (el.tagName === 'rect' && !d) {
+             var x=parseFloat(el.getAttribute('x')||0), y=parseFloat(el.getAttribute('y')||0), w=parseFloat(el.getAttribute('width')||0), h=parseFloat(el.getAttribute('height')||0);
+             d = `M ${x} ${y} L ${x+w} ${y} L ${x+w} ${y+h} L ${x} ${y+h} Z`;
+          }
+
+          if (!d) return;
+
+          if (isLabel) {
+             var baked = bakePathData(d, M);
+             if (baked) labels.push(baked);
+          } 
+          else if (hasFill || hasStroke) {
+             var segs = parseAndDecomposeBorders(d, M);
+             segs.forEach(function(s) {
+                 var h = getSegmentHash(s.p1, s.p2, s.c);
+                 if (!uniqueEdgeHashes.has(h)) {
+                     uniqueEdgeHashes.add(h);
+                     borderEdges.push(s);
+                 } else {
+                     dedupCount++;
+                 }
+             });
+          }
+      });
+      
+      console.log("Edges: " + borderEdges.length + " (Removed duplicates: " + dedupCount + ")");
+      
+      // Stitch
+      console.log("Stitching chains...");
+      var rawChains = stitchEdges(borderEdges);
+      console.log("Created " + rawChains.length + " continuous paths.");
+      
+      // Sort Borders
+      console.log("Optimizing Border Travel (TSP)...");
+      var sortedChains = sortChains(rawChains);
+      
+      // Sort Labels
+      console.log("Optimizing Label Travel (TSP)...");
+      var sortedLabels = sortLabels(labels);
+
+      // Reconstruct
+      console.log("Generating Output...");
+      var newSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      var root = doc.documentElement;
+      
+      var rootW = root.getAttribute("width") || "100%";
+      var rootH = root.getAttribute("height") || "100%";
+      var rootVB = root.getAttribute("viewBox");
+      
+      if(!rootVB || rootVB === 'null') {
+          var vW = parseFloat(rootW) || 1000;
+          var vH = parseFloat(rootH) || 1000;
+          rootVB = `0 0 ${vW} ${vH}`;
+      }
+
+      newSvg.setAttribute("width", rootW);
+      newSvg.setAttribute("height", rootH);
+      newSvg.setAttribute("viewBox", rootVB);
+      newSvg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+
+      var gBorders = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      gBorders.setAttribute("id", "laser-borders");
+      gBorders.setAttribute("stroke", FORCE_STROKE_COLOR);
+      gBorders.setAttribute("fill", "none");
+      gBorders.setAttribute("stroke-width", "0.2");
+      
+      // Convert sorted chains to path data
+      // Use Chunking for Safety
+      var currentD = "";
+      var counter = 0;
+      var flushLimit = BATCH_SIZE;
+      
+      function flush(group, dVal) {
+          if (!dVal) return;
+          var p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+          p.setAttribute("d", dVal);
+          group.appendChild(p);
+      }
+      
+      sortedChains.forEach(chain => {
+          // chain.segments is array of {edge, reverse}
+          // if chain.renderReverse is true, we iterate backwards and flip reverse flags
+          
+          var segsToRender = chain.segments;
+          if (chain.renderReverse) {
+              segsToRender = [];
+              for(var i = chain.segments.length-1; i>=0; i--) {
+                  var item = chain.segments[i];
+                  segsToRender.push({ edge: item.edge, reverse: !item.reverse });
+              }
+          }
+          
+          // Render this continuous line
+          // Determine Start point of first segment
+          var start = segsToRender[0].reverse ? segsToRender[0].edge.p2 : segsToRender[0].edge.p1;
+          
+          currentD += `M ${start[0].toFixed(3)} ${start[1].toFixed(3)} `;
+          
+          segsToRender.forEach(item => {
+              var s = item.edge;
+              var target = item.reverse ? s.p1 : s.p2; // if reversed, target is p1
+              
+              if(s.type === 'L') {
+                   currentD += `L ${target[0].toFixed(3)} ${target[1].toFixed(3)} `;
+              } else {
+                   // Quad control point is absolute, doesn't change
+                   currentD += `Q ${s.c[0].toFixed(3)} ${s.c[1].toFixed(3)} ${target[0].toFixed(3)} ${target[1].toFixed(3)} `;
+              }
+          });
+          
+          if (++counter >= flushLimit) {
+              flush(gBorders, currentD);
+              currentD = "";
+              counter = 0;
+          }
+      });
+      flush(gBorders, currentD);
+      newSvg.appendChild(gBorders);
+
+      var gLabels = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      gLabels.setAttribute("id", "laser-labels");
+      gLabels.setAttribute("stroke", FORCE_STROKE_COLOR);
+      gLabels.setAttribute("fill", "none");
+      gLabels.setAttribute("stroke-width", String(getStrokeWidthFromUI()));
+      
+      currentD = "";
+      counter = 0;
+      
+      sortedLabels.forEach(lp => {
+          currentD += lp.d + " ";
+          if (++counter >= flushLimit) {
+              flush(gLabels, currentD);
+              currentD = "";
+              counter = 0;
+          }
+      });
+      flush(gLabels, currentD);
+      newSvg.appendChild(gLabels);
+      
+      console.log("Done.");
+      return new XMLSerializer().serializeToString(newSvg);
+  }
+
+
+  // --- UI Injection ---
   function ensureButtons() {
-    var btn = document.getElementById('btnDownloadSVG');
-    if (!btn) return;
+    var oldBtn = document.getElementById('btnDownloadSVG');
+    if (!oldBtn) return;
+    if (oldBtn.getAttribute('data-pbn-patched') === 'true') return;
 
-    btn.addEventListener('click', function (ev) {
+    var newPreviewBtn = oldBtn.cloneNode(true);
+    oldBtn.parentNode.replaceChild(newPreviewBtn, oldBtn);
+    
+    newPreviewBtn.id = 'btnDownloadSVG'; 
+    newPreviewBtn.textContent = 'Download SVG (Preview)';
+    newPreviewBtn.setAttribute('data-pbn-patched', 'true');
+
+    newPreviewBtn.addEventListener('click', function(ev) {
+        ev.preventDefault();
+        try {
+            var svg = getCurrentSvgMarkup();
+            if (svg) downloadTextFile('preview.svg', svg);
+        } catch(e) { console.error(e); }
+    });
+
+    var laserBtnId = 'btnDownloadSVGLaser';
+    var oldLaserBtn = document.getElementById(laserBtnId);
+    if (oldLaserBtn) oldLaserBtn.parentNode.removeChild(oldLaserBtn); 
+
+    var laserBtn = document.createElement('a');
+    laserBtn.id = laserBtnId;
+    laserBtn.className = newPreviewBtn.className;
+    laserBtn.style.marginLeft = '8px';
+    laserBtn.textContent = 'Download Laser SVG (Optimized)';
+    
+    newPreviewBtn.parentNode.insertBefore(laserBtn, newPreviewBtn.nextSibling);
+
+    laserBtn.addEventListener('click', function (ev) {
       ev.preventDefault();
-      var svg = getCurrentSvgMarkup();
-      if (!svg) return;
-      downloadTextFile('preview.svg', svg);
-    }, true);
-
-    if (!document.getElementById('btnDownloadSVGLaser')) {
-      var laserBtn = document.createElement('a');
-      laserBtn.id = 'btnDownloadSVGLaser';
-      laserBtn.className = btn.className;
-      laserBtn.style.marginLeft = '8px';
-      laserBtn.textContent = 'Download Laser SVG';
-      btn.parentNode.insertBefore(laserBtn, btn.nextSibling);
-    }
-
-    var laserBtn2 = document.getElementById('btnDownloadSVGLaser');
-    laserBtn2.addEventListener('click', function (ev) {
-      ev.preventDefault();
-      var svg = getCurrentSvgMarkup();
-      if (!svg) return;
-      var laserSvg = buildLaserSvg(svg);
-      downloadTextFile('laser.svg', laserSvg);
-    }, true);
+      try {
+        var svg = getCurrentSvgMarkup();
+        if (!svg) { alert("No image available."); return; }
+        
+        // Timeout to let UI breathe
+        laserBtn.textContent = "Optimizing...";
+        setTimeout(function() {
+            var laserSvg = optimizeGeometry(svg);
+            downloadTextFile('laser_optimized.svg', laserSvg);
+            laserBtn.textContent = 'Download Laser SVG (Optimized)';
+        }, 50);
+        
+      } catch(e) {
+          console.error(e);
+          alert("Error: " + e.message);
+      }
+    });
   }
 
   function ensureStrokeWidthInput() {
     if (document.getElementById('txtSingleLineStrokeWidth')) return;
-    var btn = document.getElementById('btnDownloadSVG');
-    if (!btn) return;
+    var anchor = document.getElementById('btnDownloadSVGLaser');
+    if (!anchor) return;
 
     var wrapper = document.createElement('span');
     wrapper.style.marginLeft = '12px';
     wrapper.style.display = 'inline-flex';
     wrapper.style.alignItems = 'center';
     wrapper.style.gap = '6px';
-
-    var label = document.createElement('span');
-    label.textContent = 'Laser stroke';
-    label.style.fontSize = '12px';
-
+    wrapper.innerHTML = `<span style="font-size:12px;">Label Stroke:</span>`;
+    
     var input = document.createElement('input');
     input.id = 'txtSingleLineStrokeWidth';
     input.type = 'number';
     input.min = '0.1';
     input.step = '0.05';
     input.value = String(DEFAULT_STROKE_WIDTH);
-    input.style.width = '75px';
+    input.style.width = '60px';
+    input.style.height = '30px';
     input.style.margin = '0';
-
-    wrapper.appendChild(label);
     wrapper.appendChild(input);
-
-    var laserBtn = document.getElementById('btnDownloadSVGLaser');
-    var anchor = laserBtn || btn;
     anchor.parentNode.insertBefore(wrapper, anchor.nextSibling);
   }
 
-  document.addEventListener('DOMContentLoaded', function () {
-    setTimeout(function () {
-      ensureButtons();
-      ensureStrokeWidthInput();
-    }, 250);
+  // --- INIT ---
+  var _initDone = false;
+  function init() {
+     if(_initDone) return;
+     setTimeout(function(){
+         ensureButtons();
+         ensureStrokeWidthInput();
+         _initDone = true;
+     }, 1000);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+  
+  var obs = new MutationObserver(function(mutations) {
+      var needsRebind = false;
+      for(var i=0; i<mutations.length; i++) {
+          if(mutations[i].target.id === 'output-pane' || mutations[i].target.id === 'options-pane') {
+              needsRebind = true;
+              break;
+          }
+      }
+      if(needsRebind) {
+          setTimeout(function() {
+             ensureButtons();
+             ensureStrokeWidthInput();
+          }, 200);
+      }
   });
+  
+  setTimeout(function() {
+      var target = document.getElementById('options-pane') || document.body;
+      obs.observe(target, { childList: true, subtree: true });
+  }, 1500);
 
 })();
-
 --- END FILE: .\laser-export.js ---
 
 
@@ -6278,15 +6626,699 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
 --- END FILE: .\report.20260117.142506.10308.0.001.json ---
 
 
+--- START FILE: .\runtime-manual-recolor.js ---
+/*
+ * PaintByNumbersGenerator – Runtime Manual Recolor v1.0
+ * 
+ * Enables manual recoloring of individual facets by clicking in the finished SVG.
+ */
+
+(() => {
+  'use strict';
+
+  const STATE = {
+    active: false,
+    facetResult: null,
+    colorsByIndex: null, // The real RGB values
+    selectedFacetId: null
+  };
+
+  function $(id) { return document.getElementById(id); }
+
+  // --- UI ---
+  function injectUI() {
+    const parent = document.querySelector('#options-pane .collection');
+    if (!parent || $('pbnManualRecolorItem')) return;
+
+    const li = document.createElement('li');
+    li.id = 'pbnManualRecolorItem';
+    li.className = 'collection-item';
+    
+    li.innerHTML = `
+      <div class="row" style="margin-bottom:0; display:flex; align-items:center;">
+        <div class="col s8">
+           <label style="font-size:1rem; color:#000; font-weight:500;">🖊️ Recolor Facets</label>
+           <p style="font-size:0.8rem; margin:0; color:#666;">
+             Enable this, then click an area in the <b>output image</b> below.
+           </p>
+        </div>
+        <div class="col s4" style="text-align:right;">
+           <div class="switch">
+            <label>
+              Off
+              <input id="chkManualRecolor" type="checkbox">
+              <span class="lever"></span>
+              On
+            </label>
+          </div>
+        </div>
+      </div>
+    `;
+
+    // Insert after the Protection Item (or at the end)
+    const ref = $('pbnProtectionItem');
+    if(ref) ref.parentNode.insertBefore(li, ref.nextSibling);
+    else parent.appendChild(li);
+
+    // Event
+    $('chkManualRecolor').addEventListener('change', (e) => {
+        STATE.active = e.target.checked;
+        updateCursor();
+    });
+
+    // Create color picker modal
+    createColorModal();
+  }
+
+  function createColorModal() {
+    if($('pbnColorModal')) return;
+
+    const div = document.createElement('div');
+    div.id = 'pbnColorModal';
+    div.className = 'modal';
+    div.style.cssText = 'max-width: 400px; max-height: 80%;';
+    
+    div.innerHTML = `
+      <div class="modal-content">
+        <h5>Select Color</h5>
+        <p>Choose a new color for the selected facet.</p>
+        <div id="pbnColorGrid" style="display:flex; flex-wrap:wrap; gap:5px; justify-content:center;"></div>
+      </div>
+      <div class="modal-footer">
+        <a href="#!" class="modal-close waves-effect waves-green btn-flat">Cancel</a>
+      </div>
+    `;
+    
+    document.body.appendChild(div);
+    // Materialize Modal init
+    if(M && M.Modal) M.Modal.init(div);
+  }
+
+  function updateCursor() {
+    const svgContainer = $('svgContainer');
+    if(!svgContainer) return;
+    svgContainer.style.cursor = STATE.active ? 'pointer' : 'default';
+  }
+
+  // --- LOGIC ---
+
+  // We need access to the data (facetResult). We patch createSVG to intercept the reference.
+  function patchProcessManager() {
+      if (typeof window.require !== 'function') return;
+
+      window.require(['guiprocessmanager'], function(GUI) {
+          if (!GUI || !GUI.GUIProcessManager) return;
+          
+          const originalCreateSVG = GUI.GUIProcessManager.createSVG;
+          
+          GUI.GUIProcessManager.createSVG = async function(facetResult, colorsByIndex, sizeMultiplier, fill, stroke, addColorLabels, fontSize, fontColor, onUpdate) {
+              
+              // STORE DATA
+              STATE.facetResult = facetResult;
+              STATE.colorsByIndex = colorsByIndex;
+              
+              // Run original
+              return await originalCreateSVG.call(this, facetResult, colorsByIndex, sizeMultiplier, fill, stroke, addColorLabels, fontSize, fontColor, onUpdate);
+          };
+          
+          console.log("✅ GUIProcessManager patched for Manual Recolor.");
+      });
+  }
+
+  function attachSvgListeners() {
+      const svg = document.querySelector('#svgContainer svg');
+      if(!svg) return;
+
+      // We use event delegation on the SVG because there are thousands of paths
+      svg.addEventListener('click', (e) => {
+          if(!STATE.active) return;
+          
+          const target = e.target;
+          // Check if it is a path (facet) or text (label)
+          // We look for the data-facetId attribute
+          let facetId = target.getAttribute('data-facetId');
+          
+          // If clicking on a label, we often hit <g> or <text>
+          // Unfortunately labels have no DOM ID link in the original code.
+          
+          if (!facetId) {
+             // Click was on text or border
+             return; 
+          }
+          
+          e.preventDefault();
+          e.stopPropagation();
+          
+          openColorPicker(parseInt(facetId));
+      });
+      
+      // Hover effect
+      svg.addEventListener('mouseover', (e) => {
+          if(!STATE.active) return;
+          if(e.target.tagName === 'path' && e.target.hasAttribute('data-facetId')) {
+              e.target.style.opacity = '0.5';
+          }
+      });
+      svg.addEventListener('mouseout', (e) => {
+          if(!STATE.active) return;
+          if(e.target.tagName === 'path') {
+              e.target.style.opacity = '1';
+          }
+      });
+  }
+
+  function openColorPicker(facetId) {
+      STATE.selectedFacetId = facetId;
+      const facet = STATE.facetResult.facets[facetId];
+      if(!facet) return;
+
+      const grid = $('pbnColorGrid');
+      grid.innerHTML = '';
+      
+      const currentColorIdx = facet.color;
+      
+      // Render palette
+      STATE.colorsByIndex.forEach((rgb, idx) => {
+          const colorStr = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+          const div = document.createElement('div');
+          
+          const isSelected = (idx === currentColorIdx);
+          
+          div.style.cssText = `
+            width: 40px; height: 40px; 
+            background-color: ${colorStr};
+            border: ${isSelected ? '3px solid red' : '1px solid #ccc'};
+            cursor: pointer;
+            border-radius: 4px;
+            display: flex; align-items: center; justify-content: center;
+            font-weight: bold;
+            color: ${getContrastYIQ(colorStr)};
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+          `;
+          
+          // Show the "new number" from the palette DOM (safest source)
+          const paletteDom = document.querySelectorAll('#palette .color');
+          let label = idx; // Fallback: index 0..N
+          if(paletteDom && paletteDom[idx]) {
+              label = paletteDom[idx].innerText; // The number the user sees (1..N)
+          }
+          div.innerText = label;
+          
+          div.onclick = () => applyColorChange(facetId, idx);
+          
+          grid.appendChild(div);
+      });
+
+      const modal = M.Modal.getInstance($('pbnColorModal'));
+      modal.open();
+  }
+
+  function applyColorChange(facetId, newColorIndex) {
+      if(!STATE.facetResult) return;
+      
+      // 1. Change data
+      STATE.facetResult.facets[facetId].color = newColorIndex;
+      
+      // 2. Close modal
+      const modal = M.Modal.getInstance($('pbnColorModal'));
+      modal.close();
+      
+      // 3. Re-render SVG
+      window.require(['gui'], function(GUI) {
+         if(GUI && GUI.updateOutput) {
+             GUI.updateOutput();
+             M.toast({html: 'Facet recolored!', classes: 'rounded green'});
+         }
+      });
+  }
+
+  // Helper
+  function getContrastYIQ(rgbStr){
+    const parts = rgbStr.match(/\d+/g);
+    if(!parts) return 'black';
+    const r = parseInt(parts[0]);
+    const g = parseInt(parts[1]);
+    const b = parseInt(parts[2]);
+    var yiq = ((r*299)+(g*587)+(b*114))/1000;
+    return (yiq >= 128) ? 'black' : 'white';
+  }
+
+  // --- INIT ---
+  function init() {
+      setTimeout(injectUI, 1000);
+      setTimeout(patchProcessManager, 2000);
+      
+      // SVG listeners must be reattached when the SVG is rebuilt
+      const container = $('svgContainer');
+      if(container) {
+          const obs = new MutationObserver(() => {
+              attachSvgListeners();
+              updateCursor();
+          });
+          obs.observe(container, {childList: true});
+      }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+
+})();
+
+--- END FILE: .\runtime-manual-recolor.js ---
+
+
+--- START FILE: .\runtime-protection.js ---
+/*
+ * PaintByNumbersGenerator – Runtime Protection v3.2 (Single Interaction & Persistence)
+ * 
+ * Features:
+ * - Interaktiver Schutz öffnet sich nur beim ersten Bereinigungs-Durchlauf.
+ * - Speichert Koordinaten der geschützten Bereiche, um sie in Folgedurchläufen (wo sich IDs ändern) automatisch wiederzufinden.
+ * - Zoom & Smart Filter inklusive.
+ */
+
+(() => {
+  'use strict';
+
+  // --- STATE ---
+  const STATE = {
+    enabled: false,
+    isPaused: false,
+    hasShownUI: false, // Neu: Merkt sich, ob wir schon gefragt haben
+    
+    // Daten
+    protectedIds: new Set(),      // Aktuelle IDs im laufenden Step
+    protectedCoords: [],          // Neu: Permanente Koordinaten {x,y} für Folgedurchläufe
+    candidates: new Set(),
+    ignoredIds: new Set(),
+    
+    // Referenzen
+    facetResult: null,
+    colorsByIndex: null,
+    resolveFunc: null,
+    
+    // UI Settings
+    zoomLevel: 2.0,      
+    filterPercent: 50,   
+    
+    // Canvas
+    canvas: null,
+    ctx: null
+  };
+
+  // --- DOM HELPERS ---
+  function $(id) { return document.getElementById(id); }
+
+  // --- UI INTEGRATION ---
+  function injectUI() {
+    const parent = document.querySelector('#options-pane .collection');
+    if (!parent || $('pbnProtectionItem')) return;
+
+    const li = document.createElement('li');
+    li.id = 'pbnProtectionItem';
+    li.className = 'collection-item';
+    
+    li.innerHTML = `
+      <div class="row" style="margin-bottom:0;">
+        <div class="col s12">
+           <label style="font-size:1rem; color:#000; font-weight:500;">🛡️ Interaktiver Detailschutz v3.2</label>
+        </div>
+        
+        <div class="col s4" style="margin-top:10px;">
+           <div class="switch">
+            <label>
+              Aus
+              <input id="chkEnableProtection" type="checkbox">
+              <span class="lever"></span>
+              An
+            </label>
+          </div>
+        </div>
+
+        <div class="input-field col s4" style="margin-top:0;">
+            <input id="txtProtectionZoom" type="number" value="2" min="1" max="10" step="0.5">
+            <label for="txtProtectionZoom" class="active">Vorschau Zoom (x)</label>
+        </div>
+
+        <div class="input-field col s4" style="margin-top:0;">
+            <input id="txtProtectionFilter" type="number" value="50" min="0" max="100">
+            <label for="txtProtectionFilter" class="active">Filter % (Staub)</label>
+        </div>
+        
+        <div class="col s12">
+            <p style="font-size:0.8rem; margin:0; color:#666;">
+            Pausiert <b>einmalig</b> beim ersten Durchlauf. <br>
+            <b>Rot:</b> Wird gelöscht. <b>Grün:</b> Gerettet (auch für Folgedurchläufe).
+            </p>
+        </div>
+      </div>
+    `;
+
+    parent.insertBefore(li, parent.children[3]);
+
+    // Bindings
+    $('chkEnableProtection').addEventListener('change', (e) => STATE.enabled = e.target.checked);
+    
+    $('txtProtectionZoom').addEventListener('change', (e) => {
+        STATE.zoomLevel = parseFloat(e.target.value) || 1;
+        if(STATE.isPaused) drawInteractiveScreen(); 
+    });
+
+    $('txtProtectionFilter').addEventListener('change', (e) => {
+        STATE.filterPercent = parseInt(e.target.value) || 0;
+        if(STATE.isPaused) {
+            recalcCandidates(STATE.threshold);
+            drawInteractiveScreen();
+        }
+    });
+
+    // Reset State wenn User "Process Image" drückt
+    const processBtn = $('btnProcess');
+    if (processBtn) {
+        processBtn.addEventListener('click', () => {
+            STATE.hasShownUI = false;
+            STATE.protectedCoords = [];
+            STATE.protectedIds.clear();
+        });
+    }
+
+    const floatBtn = document.createElement('div');
+    floatBtn.id = 'pbnContinueBtn';
+    floatBtn.style.cssText = `
+        position: fixed; bottom: 30px; right: 30px; z-index: 9999;
+        display: none; padding: 15px 25px; background: #26a69a; color: white;
+        font-weight: bold; font-size: 16px; border-radius: 50px;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.3); cursor: pointer;
+        transition: transform 0.2s;
+    `;
+    floatBtn.innerHTML = 'Weiter <i class="material-icons" style="vertical-align:middle;">play_arrow</i>';
+    floatBtn.onclick = resumeProcess;
+    document.body.appendChild(floatBtn);
+
+    const style = document.createElement('style');
+    style.textContent = `
+        #reduction-pane {
+            overflow: auto !important;
+            max-height: 80vh;
+            background: #e0e0e0;
+            text-align: center;
+        }
+        #cReduction {
+            margin: 0 auto;
+            box-shadow: 0 0 20px rgba(0,0,0,0.2);
+            background: white;
+            image-rendering: pixelated;
+        }
+    `;
+    document.head.appendChild(style);
+}
+
+  // --- LOGIC HELPER ---
+
+  // Findet einen repräsentativen Punkt (x,y) innerhalb einer Facette
+  // Wird benötigt, um die Facette in späteren Durchläufen wiederzufinden
+  function getRepresentativePoint(facetId, facetResult) {
+      const f = facetResult.facets[facetId];
+      if (!f) return null;
+
+      // Wir scannen die Bounding Box, bis wir einen Pixel finden, der zur ID gehört
+      for (let y = f.bbox.minY; y <= f.bbox.maxY; y++) {
+          for (let x = f.bbox.minX; x <= f.bbox.maxX; x++) {
+              if (facetResult.facetMap.get(x, y) === facetId) {
+                  return { x, y };
+              }
+          }
+      }
+      return null;
+  }
+
+  function recalcCandidates(smallerThan) {
+      if (!STATE.facetResult) return;
+      STATE.candidates.clear();
+      STATE.ignoredIds.clear();
+      
+      const minSize = Math.floor(smallerThan * (STATE.filterPercent / 100));
+
+      for (const f of STATE.facetResult.facets) {
+          if (!f) continue;
+          if (f.pointCount < smallerThan) {
+              if (f.pointCount < minSize) {
+                  STATE.ignoredIds.add(f.id); 
+              } else {
+                  STATE.candidates.add(f.id);
+              }
+          }
+      }
+      
+      const btn = $('pbnContinueBtn');
+      if(btn) btn.innerHTML = `Weiter (${STATE.candidates.size} Bereiche löschen) <i class="material-icons" style="vertical-align:middle;">play_arrow</i>`;
+  }
+
+  function drawInteractiveScreen() {
+    if (!STATE.canvas || !STATE.facetResult) return;
+    
+    const width = STATE.facetResult.width;
+    const height = STATE.facetResult.height;
+    const map = STATE.facetResult.facetMap;
+    const colors = STATE.colorsByIndex; 
+    
+    const displayW = Math.floor(width * STATE.zoomLevel);
+    const displayH = Math.floor(height * STATE.zoomLevel);
+    
+    STATE.canvas.width = displayW;
+    STATE.canvas.height = displayH;
+    
+    STATE.ctx.scale(STATE.zoomLevel, STATE.zoomLevel);
+
+    const bgCanvas = document.createElement('canvas');
+    bgCanvas.width = width;
+    bgCanvas.height = height;
+    const bgCtx = bgCanvas.getContext('2d');
+    const imgData = bgCtx.createImageData(width, height);
+    const data = imgData.data;
+
+    for (let i = 0; i < width * height; i++) {
+        const x = i % width;
+        const y = Math.floor(i / width);
+        const id = map.get(x, y);
+        
+        let r=255, g=255, b=255;
+        
+        const facet = STATE.facetResult.facets[id];
+        if (facet) {
+            const col = colors[facet.color]; 
+            r = col[0]; g = col[1]; b = col[2];
+            
+            if (STATE.protectedIds.has(id)) {
+                r = (r + 0) / 2; g = (g + 255) / 2; b = (b + 0) / 2;
+            } else if (STATE.candidates.has(id)) {
+                r = (r + 255) / 2; g = (g + 0) / 2; b = (b + 0) / 2;
+            } else if (STATE.ignoredIds.has(id)) {
+                r = (r + 200) / 2; g = (g + 200) / 2; b = (b + 200) / 2;
+            }
+        }
+
+        const idx = i * 4;
+        data[idx] = r; data[idx+1] = g; data[idx+2] = b; data[idx+3] = 255;
+    }
+    
+    bgCtx.putImageData(imgData, 0, 0);
+
+    STATE.ctx.imageSmoothingEnabled = false;
+    STATE.ctx.drawImage(bgCanvas, 0, 0);
+
+    STATE.ctx.fillStyle = "rgba(0,0,0,0.5)"; 
+    
+    const drawBorders = (id, color) => {
+        const f = STATE.facetResult.facets[id];
+        if (!f || !f.borderPoints) return;
+
+        STATE.ctx.fillStyle = color;
+        for (const pt of f.borderPoints) {
+            STATE.ctx.fillRect(pt.x, pt.y, 1, 1);
+        }
+    };
+
+    STATE.candidates.forEach(id => {
+        if (!STATE.protectedIds.has(id)) drawBorders(id, "rgba(200, 0, 0, 0.8)");
+    });
+
+    STATE.protectedIds.forEach(id => {
+        drawBorders(id, "rgba(0, 150, 0, 0.9)");
+    });
+  }
+
+  function handleCanvasClick(e) {
+    if (!STATE.isPaused || !STATE.facetResult) return;
+
+    const rect = STATE.canvas.getBoundingClientRect();
+    const scaleX = STATE.canvas.width / rect.width;
+    const scaleY = STATE.canvas.height / rect.height;
+
+    const canvasX = (e.clientX - rect.left) * scaleX;
+    const canvasY = (e.clientY - rect.top) * scaleY;
+
+    const originalX = Math.floor(canvasX / STATE.zoomLevel);
+    const originalY = Math.floor(canvasY / STATE.zoomLevel);
+
+    if (originalX < 0 || originalX >= STATE.facetResult.width || originalY < 0 || originalY >= STATE.facetResult.height) return;
+
+    const id = STATE.facetResult.facetMap.get(originalX, originalY);
+
+    if (STATE.candidates.has(id) || STATE.ignoredIds.has(id)) {
+        if (STATE.protectedIds.has(id)) {
+            STATE.protectedIds.delete(id);
+        } else {
+            STATE.protectedIds.add(id);
+        }
+        requestAnimationFrame(drawInteractiveScreen);
+    }
+  }
+
+  function resumeProcess() {
+    if (STATE.resolveFunc) {
+        // Jetzt speichern wir die Koordinaten der geschützten Facetten für später
+        STATE.protectedCoords = [];
+        STATE.protectedIds.forEach(id => {
+            const pt = getRepresentativePoint(id, STATE.facetResult);
+            if (pt) STATE.protectedCoords.push(pt);
+        });
+
+        // UI Reset
+        $('pbnContinueBtn').style.display = 'none';
+        STATE.canvas.style.cursor = 'default';
+        STATE.canvas.removeEventListener('mousedown', handleCanvasClick);
+        STATE.isPaused = false;
+        
+        // Merken dass wir fertig sind
+        STATE.hasShownUI = true;
+
+        STATE.resolveFunc();
+    }
+  }
+
+  // --- PATCH ---
+  function patchFacetReducer() {
+    if (typeof window.require !== 'function') return;
+
+    window.require(['facetReducer'], function(FacetReducerModule) {
+      if (!FacetReducerModule || !FacetReducerModule.FacetReducer) return;
+
+      const FacetReducer = FacetReducerModule.FacetReducer;
+      
+      if (!FacetReducer._originalReduceFacets) {
+        FacetReducer._originalReduceFacets = FacetReducer.reduceFacets;
+      }
+
+      FacetReducer.reduceFacets = async function(smallerThan, removeLargeToSmall, maxFacets, colors, facetResult, imgIndices, onUpdate) {
+        
+        if (!STATE.enabled) {
+            return await FacetReducer._originalReduceFacets.call(this, smallerThan, removeLargeToSmall, maxFacets, colors, facetResult, imgIndices, onUpdate);
+        }
+
+        // --- Logik für Durchlauf ---
+        
+        STATE.facetResult = facetResult;
+        STATE.colorsByIndex = colors;
+        STATE.threshold = smallerThan;
+        
+        // Liste für den aktuellen Durchlauf leeren
+        STATE.protectedIds.clear();
+
+        // 1. Wenn UI noch nicht gezeigt wurde (Erster Durchlauf): Interaktion
+        if (!STATE.hasShownUI) {
+            console.log(`[Protection] First run. Pausing for user interaction.`);
+            STATE.isPaused = true;
+            
+            recalcCandidates(smallerThan);
+
+            const tabs = M.Tabs.getInstance($('tabsOutput'));
+            if (tabs) tabs.select('reduction-pane');
+            
+            STATE.canvas = $('cReduction');
+            STATE.ctx = STATE.canvas.getContext('2d');
+            
+            STATE.canvas.addEventListener('mousedown', handleCanvasClick);
+            STATE.canvas.style.cursor = 'crosshair';
+
+            drawInteractiveScreen();
+
+            const btn = $('pbnContinueBtn');
+            btn.style.display = 'block';
+            
+            // WARTEN auf User
+            await new Promise(resolve => STATE.resolveFunc = resolve);
+            
+            if(btn) btn.innerHTML = "Verarbeite...";
+            await new Promise(r => setTimeout(r, 50)); 
+        } 
+        // 2. Wenn UI schon gezeigt wurde (Folge-Durchläufe): Automatisch schützen
+        else {
+            console.log(`[Protection] Subsequent run. Auto-protecting based on coordinates.`);
+            // Wir nutzen die gespeicherten Koordinaten, um die IDs im *neuen* facetResult zu finden
+            // Da sich die IDs zwischen den Durchläufen ändern können (Neuaufbau der Facetten)
+            if (STATE.protectedCoords.length > 0) {
+                STATE.protectedCoords.forEach(pt => {
+                    if (pt.x < facetResult.width && pt.y < facetResult.height) {
+                        const currentId = facetResult.facetMap.get(pt.x, pt.y);
+                        STATE.protectedIds.add(currentId);
+                    }
+                });
+            }
+        }
+
+        // 3. Schutz anwenden (Hack: PointCount riesig machen)
+        const restoreList = [];
+        STATE.protectedIds.forEach(id => {
+            const facet = facetResult.facets[id];
+            if (facet) {
+                restoreList.push({ facet: facet, origCount: facet.pointCount });
+                facet.pointCount = 999999999; 
+            }
+        });
+
+        // 4. Original ausführen
+        await FacetReducer._originalReduceFacets.call(this, smallerThan, removeLargeToSmall, maxFacets, colors, facetResult, imgIndices, onUpdate);
+
+        // 5. Restore (damit Labels nicht explodieren oder so)
+        restoreList.forEach(item => {
+            if (item.facet) item.facet.pointCount = item.origCount;
+        });
+      };
+      
+      console.log("✅ FacetReducer patched for Interactive Mode v3.2 (Single Prompt).");
+    });
+  }
+
+  // --- INIT ---
+  function init() {
+    setTimeout(injectUI, 1000);
+    setTimeout(patchFacetReducer, 2000);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+
+})();
+--- END FILE: .\runtime-protection.js ---
+
+
 --- START FILE: .\runtime-recolor.js ---
 /*
- * PaintByNumbersGenerator – Runtime Recolor v4.0 (The "Overhaul" Edition)
+ * PaintByNumbersGenerator – Runtime Recolor v4.3 (Sync Fix + Highlighting)
  * 
  * Features:
  * 1. Live Recolor (SVG + HTML UI)
- * 2. Intelligent Sorting (White -> Chromatic Groups -> Black)
- * 3. Live Renumbering (Updates labels in SVG to match new sort order)
- * 4. Custom Palette Download (Generates PNG with NEW colors and NEW numbers)
+ * 2. Intelligent Sorting (White -> Chromatic -> Black)
+ * 3. Stable Renumbering (Fixes sync issues between image and palette)
+ * 4. Visual Connection: Hover over a color in the list to highlight it in the SVG.
+ * 5. Persistence: Keeps custom colors when resizing image.
  */
 
 (() => {
@@ -6294,11 +7326,11 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
 
   // --- STATE MANAGEMENT ---
   const STATE = {
-    // Array of objects: { id: "originalIndex", hex: "#aaaaaa", sortKey: number, label: string, luminance: number }
+    // Array of objects
     palette: [], 
-    // Map: "originalHex" -> "newHex" (Benutzerdefinierte Farben)
+    // Map: "originalHex" -> "newHex"
     mapping: new Map(),
-    // Map: "originalIndex" (string) -> "newIndex" (number) (Für das Umschreiben der Labels)
+    // Map: "originalIndex" (string) -> "newIndex" (number)
     indexMap: new Map() 
   };
 
@@ -6309,6 +7341,30 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
   function getSvg() {
     const c = $('#svgContainer');
     return c ? c.querySelector('svg') : null;
+  }
+
+  function injectStyles() {
+    if ($('#pbn-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'pbn-styles';
+    style.textContent = `
+      .pbn-highlight-path {
+        stroke: #ff0000 !important;
+        stroke-width: 3px !important;
+        vector-effect: non-scaling-stroke;
+        opacity: 0.9 !important;
+      }
+      .pbn-highlight-text {
+        fill: #ff0000 !important;
+        font-weight: bold;
+        font-size: 1.2em;
+      }
+      .pbn-row-hover {
+        background-color: #e0f2f1 !important;
+        cursor: crosshair;
+      }
+    `;
+    document.head.appendChild(style);
   }
 
   // --- COLOR UTILS ---
@@ -6357,85 +7413,123 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
 
   // --- SORTING LOGIC ---
   function getCategory(h, s, l) {
-    // 1. Whites / Highlights (Luminance > 90%)
     if (l > 0.90) return { order: 1, label: '⚪ Weiß / Hell' };
-    
-    // 2. Blacks / Deep Shadows (Luminance < 15%)
     if (l < 0.1) return { order: 99, label: '⚫ Schwarz / Dunkel' };
-
-    // 3. Greys (Low Saturation)
     if (s < 0.12) return { order: 90, label: '🌫️ Grau / Neutral' };
-
-    // 4. Chromatic Colors - Sorted by Spectrum
-    // Rot/Orange/Gelb
     if (h >= 330 || h < 60) return { order: 10, label: '🟡🔴 Gelb & Rot' };
-    // Grün/Türkis
     if (h >= 60 && h < 170) return { order: 20, label: '🟢 Grün & Türkis' };
-    // Blau/Violett
     return { order: 30, label: '🔵🟣 Blau & Violett' };
   }
 
   // --- CORE ANALYSIS ---
 
-  // Liest die ursprüngliche Palette aus, um Mapping zwischen Farbe und Original-ID zu bekommen
+  // Liest die ursprüngliche Palette aus dem DOM aus
   function analyzeOriginalData() {
     const rawPalette = [];
     const tiles = $all('#palette .color');
     
     tiles.forEach(tile => {
       const bg = parseColorToHex(tile.style.backgroundColor);
-      const nr = tile.innerText.trim(); // Original Index (0, 1, 2...)
+      // WICHTIG: Wir holen die ID entweder aus dem Text (beim ersten Mal) oder aus dem Attribut (wenn wir es schon mal geändert haben)
+      let nr = tile.getAttribute('data-orig-id');
       
+      if (!nr) {
+        nr = tile.innerText.trim();
+        if (nr !== '') {
+            tile.setAttribute('data-orig-id', nr); // ID festnageln
+        }
+      }
+
       if (bg && nr !== '') {
-        // Initiale Farbe speichern
         if (!tile.hasAttribute('data-orig-bg')) {
           tile.setAttribute('data-orig-bg', bg);
         }
         
-        const rgb = hexToRgb(bg) || {r:0,g:0,b:0};
-        const hsl = rgbToHsl(rgb.r, rgb.g, rgb.b);
-        const cat = getCategory(hsl.h, hsl.s, hsl.l);
-
         rawPalette.push({
-          id: nr, // String "0", "1", etc.
-          origHex: bg,
-          groupOrder: cat.order,
-          groupLabel: cat.label,
-          light: hsl.l,
-          hue: hsl.h
+          id: nr, // Das ist die "wahre" ID (0-15)
+          origHex: bg
         });
       }
     });
     return rawPalette;
   }
 
-  function recalculatePalette() {
-    // 1. Hole Basisdaten
-    let data = analyzeOriginalData();
+  function arePalettesEqual(oldPalette, newRawData) {
+    if (!oldPalette || oldPalette.length === 0) return false;
+    if (oldPalette.length !== newRawData.length) return false;
 
-    // 2. Sortieren
-    // Regel: Erst nach Gruppe, dann nach Helligkeit (Hell -> Dunkel)
-    data.sort((a, b) => {
+    const oldMap = new Map();
+    oldPalette.forEach(p => oldMap.set(p.id, p.origHex));
+
+    for (const newItem of newRawData) {
+        if (!oldMap.has(newItem.id)) return false;
+        if (oldMap.get(newItem.id) !== newItem.origHex) return false;
+    }
+    return true;
+  }
+
+  function refreshStateFromDom() {
+    const newRawData = analyzeOriginalData();
+    const isSameImage = arePalettesEqual(STATE.palette, newRawData);
+
+    if (!isSameImage) {
+        STATE.mapping.clear();
+    }
+    STATE.palette = newRawData;
+    performResort();
+  }
+
+  function performResort() {
+    // Metriken aktualisieren
+    STATE.palette.forEach(item => {
+        const currentHex = STATE.mapping.get(item.origHex) || item.origHex;
+        const rgb = hexToRgb(currentHex) || {r:0,g:0,b:0};
+        const hsl = rgbToHsl(rgb.r, rgb.g, rgb.b);
+        const cat = getCategory(hsl.h, hsl.s, hsl.l);
+
+        item.groupOrder = cat.order;
+        item.groupLabel = cat.label;
+        item.light = hsl.l;
+    });
+
+    // Sortieren
+    STATE.palette.sort((a, b) => {
       if (a.groupOrder !== b.groupOrder) return a.groupOrder - b.groupOrder;
-      // Innerhalb der Gruppe: Helligkeit absteigend (Hell zuerst)
       return b.light - a.light;
     });
 
-    // 3. Neue Indexierung zuweisen (1 ... N)
+    // Mapping erstellen
     STATE.indexMap.clear();
-    STATE.palette = data.map((item, idx) => {
-      const newNr = idx + 1; // Wir fangen bei 1 an zu zählen, ist natürlicher
+    STATE.palette.forEach((item, idx) => {
+      const newNr = idx + 1;
       STATE.indexMap.set(item.id, newNr);
-      return {
-        ...item,
-        newNr: newNr
-      };
+      item.newNr = newNr;
     });
 
-    // 4. GUI & SVG aktualisieren
     updateRuntimeInterface();
     updateNativePalette();
     updateSvgContent();
+  }
+
+  // --- HIGHLIGHTING ---
+  function toggleHighlight(originalId, originalHex, active) {
+    const svg = getSvg();
+    if (!svg) return;
+
+    // 1. Flächen highlighten (basierend auf Original-Farbe, da diese in data-orig-fill steht)
+    // Wir nutzen hier den Hex-Wert, da SVG paths oft keine ID haben, aber wir haben data-orig-fill gesetzt.
+    const paths = $all(`path[data-orig-fill="${originalHex}"]`, svg);
+    paths.forEach(p => {
+        if (active) p.classList.add('pbn-highlight-path');
+        else p.classList.remove('pbn-highlight-path');
+    });
+
+    // 2. Zahlen highlighten (basierend auf Original-ID 0-15)
+    const texts = $all(`text[data-orig-text="${originalId}"]`, svg);
+    texts.forEach(t => {
+        if (active) t.classList.add('pbn-highlight-text');
+        else t.classList.remove('pbn-highlight-text');
+    });
   }
 
   // --- UPDATE FUNCTIONS ---
@@ -6443,15 +7537,15 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
   function updateRuntimeInterface() {
     const list = $('#pbnRecolorList');
     if (!list) return;
+    
+    const scrollPos = list.scrollTop;
     list.innerHTML = '';
 
     let lastLabel = '';
 
     STATE.palette.forEach(item => {
-      // Benutzerdefinierte Farbe oder Original
       const currentHex = STATE.mapping.get(item.origHex) || item.origHex;
 
-      // Gruppen-Header
       if (item.groupLabel !== lastLabel) {
         const h = document.createElement('div');
         h.style.cssText = 'padding:6px 0 2px 0;margin-top:5px;font-size:0.75rem;font-weight:bold;color:#666;border-bottom:1px solid #eee;';
@@ -6461,14 +7555,25 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
       }
 
       const row = document.createElement('div');
-      row.style.cssText = 'display:flex;gap:6px;align-items:center;margin-bottom:2px;padding:2px 0;';
+      row.className = 'pbn-row';
+      row.style.cssText = 'display:flex;gap:6px;align-items:center;margin-bottom:2px;padding:2px 0;border-radius:4px;transition:background 0.2s;';
 
-      // Neue Nummer
+      // Mouse Events für Highlight
+      row.addEventListener('mouseenter', () => {
+          row.classList.add('pbn-row-hover');
+          toggleHighlight(item.id, item.origHex, true);
+      });
+      row.addEventListener('mouseleave', () => {
+          row.classList.remove('pbn-row-hover');
+          toggleHighlight(item.id, item.origHex, false);
+      });
+
+      // Nummer
       const nr = document.createElement('div');
       nr.textContent = `#${item.newNr}`;
-      nr.style.cssText = 'font-weight:bold;width:30px;text-align:right;font-size:12px;color:#333;';
+      nr.style.cssText = 'font-weight:bold;width:30px;text-align:right;font-size:12px;color:#333;pointer-events:none;';
 
-      // Farbfeld (Input)
+      // Input
       const inp = document.createElement('input');
       inp.type = 'text';
       inp.value = currentHex;
@@ -6489,26 +7594,26 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
         } else {
           STATE.mapping.delete(item.origHex);
         }
-        // Kompletten Refresh auslösen (für Sortierung falls sich Farbe drastisch ändert, optional)
-        // Hier machen wir nur Repaint für Performance
+        
         requestAnimationFrame(() => {
-          updateRuntimeInterface();
-          updateNativePalette();
-          updateSvgContent();
+            performResort();
         });
       });
 
       row.append(nr, inp);
       list.appendChild(row);
     });
+
+    list.scrollTop = scrollPos;
   }
 
   function updateNativePalette() {
-    // Wir bauen das HTML von #palette komplett neu auf, basierend auf unserer Sortierung
     const container = $('#palette');
     if (!container) return;
 
-    container.innerHTML = ''; // Leeren
+    // Nur den visuellen Inhalt leeren, nicht die Logik zerstören
+    // Da wir aber analyzeOriginalData am Anfang machen, ist das hier okay für die Anzeige
+    container.innerHTML = '';
 
     STATE.palette.forEach(item => {
       const currentHex = STATE.mapping.get(item.origHex) || item.origHex;
@@ -6523,13 +7628,17 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
         color: ${getContrastYIQ(currentHex)};
         text-shadow: none;
       `;
+      // Hier schreiben wir die NEUE Nummer rein
       div.innerText = item.newNr;
-      div.setAttribute('data-tooltip', `Alt: ${item.id} | Hex: ${currentHex}`);
+      div.setAttribute('data-tooltip', `Original ID: ${item.id} | Hex: ${currentHex}`);
+      
+      // Damit analyzeOriginalData beim nächsten Resize nicht verwirrt ist, schreiben wir die alte ID als Attribut rein
+      div.setAttribute('data-orig-id', item.id);
+      div.setAttribute('data-orig-bg', item.origHex);
       
       container.appendChild(div);
     });
     
-    // Tooltips re-initialisieren (Materialize)
     if (window.M && M.Tooltip) M.Tooltip.init($all('.tooltipped'));
   }
 
@@ -6539,7 +7648,6 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
 
     // 1. Fills aktualisieren
     $all('path, polygon, rect, circle', svg).forEach(el => {
-        // Farbe finden
         let hex = el.getAttribute('data-orig-fill');
         if (!hex) {
             // Beim ersten Lauf sichern
@@ -6548,13 +7656,11 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
         }
 
         if (hex) {
-            // Check mapping
             const newHex = STATE.mapping.get(hex);
             if (newHex) {
                 el.setAttribute('fill', newHex);
                 el.style.fill = newHex;
             } else {
-                // Reset auf original falls mapping gelöscht
                 el.setAttribute('fill', hex);
                 el.style.fill = hex;
             }
@@ -6562,21 +7668,21 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
     });
 
     // 2. Labels (Nummern) aktualisieren
-    // Wir suchen nach Text-Nodes, die nur Zahlen enthalten
     $all('text', svg).forEach(el => {
-        // Originaltext sichern
-        let originalText = el.getAttribute('data-orig-text');
-        if (!originalText) {
-            originalText = el.textContent.trim();
-            if (/^\d+$/.test(originalText)) {
-                el.setAttribute('data-orig-text', originalText);
+        let originalId = el.getAttribute('data-orig-text');
+        
+        if (!originalId) {
+            // Versuchen, die ID aus dem Textinhalt zu retten, BEVOR wir ihn überschreiben
+            const textContent = el.textContent.trim();
+            if (/^\d+$/.test(textContent)) {
+                originalId = textContent;
+                el.setAttribute('data-orig-text', originalId);
             } else {
-                return; // Kein Label
+                return;
             }
         }
 
-        // Neue Nummer suchen
-        const newNr = STATE.indexMap.get(originalText);
+        const newNr = STATE.indexMap.get(originalId);
         if (newNr !== undefined) {
             el.textContent = newNr;
         }
@@ -6584,12 +7690,10 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
   }
 
   // --- CUSTOM PNG GENERATOR ---
-  // Ersetzt die alte downloadPalettePng Funktion komplett
   function hijackDownloadButton() {
     const btn = $('#btnDownloadPalettePNG');
     if (!btn) return;
 
-    // Klonen um alte Event-Listener zu entfernen
     const newBtn = btn.cloneNode(true);
     btn.parentNode.replaceChild(newBtn, btn);
 
@@ -6601,13 +7705,13 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
 
   function generateCustomPalettePng() {
     const canvas = document.createElement("canvas");
-    const items = STATE.palette; // Unsere sortierte Liste
+    const items = STATE.palette; 
 
-    const nrOfItemsPerRow = 5; // Weniger pro Reihe, dafür lesbarer
+    const nrOfItemsPerRow = 5; 
     const nrRows = Math.ceil(items.length / nrOfItemsPerRow);
     
     const margin = 20;
-    const cellWidth = 150; // Breiter für Details
+    const cellWidth = 150;
     const cellHeight = 100;
 
     canvas.width = margin + nrOfItemsPerRow * (cellWidth + margin);
@@ -6630,36 +7734,29 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
       const x = margin + col * (cellWidth + margin);
       const y = margin + row * (cellHeight + margin);
 
-      // Farbfeld
       ctx.fillStyle = currentHex;
       ctx.fillRect(x, y, cellWidth, cellHeight - 30);
       
-      // Rahmen
       ctx.strokeStyle = "#444";
       ctx.lineWidth = 2;
       ctx.strokeRect(x, y, cellWidth, cellHeight - 30);
 
-      // Nummer (in der Farbe, kontrastreich)
       ctx.fillStyle = getContrastYIQ(currentHex);
       ctx.fillText(item.newNr, x + cellWidth / 2, y + (cellHeight - 30) / 2);
 
-      // Text unten (Hex Code)
       ctx.fillStyle = "black";
       ctx.font = "14px Arial";
       ctx.fillText(currentHex, x + cellWidth / 2, y + cellHeight - 10);
       
-      // Reset Font für nächste Nummer
       ctx.font = "bold 24px Arial";
     });
 
-    // Download auslösen
     const link = document.createElement('a');
     link.download = 'Mischpalette_Sortiert.png';
     link.href = canvas.toDataURL();
     link.click();
   }
 
-  // --- HELPER: Contrast Text Color ---
   function getContrastYIQ(hexcolor){
     hexcolor = hexcolor.replace("#", "");
     var r = parseInt(hexcolor.substr(0,2),16);
@@ -6685,6 +7782,7 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
       <p style="font-size:0.8rem;color:#666;">
         Die Farben wurden automatisch nach Logik sortiert (Weiß -> Bunt -> Schwarz).<br>
         Ändere die Farben hier. <b>Wichtig:</b> Die Nummern im Bild passen sich der neuen Sortierung an!
+        <br><i>Tipp: Fahre mit der Maus über eine Farbe, um sie im Bild zu finden.</i>
       </p>
       <div id="pbnRecolorList" style="max-height:400px;overflow-y:auto;padding-right:10px;"></div>
     `;
@@ -6693,17 +7791,16 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
   }
 
   function init() {
-    const container = $('#svgContainer');
+    injectStyles();
     
-    // Observer: Falls der User "Process Image" drückt und ein neues SVG kommt
+    const container = $('#svgContainer');
     if (container) {
       const obs = new MutationObserver((mutations) => {
-        // Prüfen ob wirklich ein SVG hinzugefügt wurde
         const hasSvg = mutations.some(m => Array.from(m.addedNodes).some(n => n.nodeName === 'svg'));
         if (hasSvg) {
           setTimeout(() => {
-            recalculatePalette(); 
-            hijackDownloadButton(); // Muss neu gebunden werden
+            refreshStateFromDom(); 
+            hijackDownloadButton();
           }, 500);
         }
       });
@@ -6712,9 +7809,8 @@ Install pkg first if you don't have it yet `npm install pkg -g`. Then in the roo
 
     ensurePanel();
     
-    // Initialer Run, falls schon ein Bild da ist
     if (getSvg()) {
-        recalculatePalette();
+        refreshStateFromDom();
         hijackDownloadButton();
     }
   }

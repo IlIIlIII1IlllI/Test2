@@ -347,9 +347,9 @@
                         <div class="input-field">
                             <input placeholder="SVG Size multiplier" id="txtSizeMultiplier" type="number" value="3"
                                 min="1" class="validate">
-                            <label for="txtSizeMultiplier">SVG size multiplier
+                            <label for="txtSizeMultiplier">Preview Scaler (Resolution)
                                 <i class="material-icons tooltipped"
-                                    data-tooltip="Increases the SVG size compared to the original image, useful when the labels don't fit inside the tiny segments">info</i>
+                                    data-tooltip="Multiplies internal coordinate resolution (1=Pixel perfect, 3=High Def). Higher values = smoother curves but thinner looking lines in preview.">info</i>
                             </label>
                         </div>
                     </div>
@@ -429,6 +429,25 @@
 <script src="scripts/upgrades/runtime-recolor.js"></script>
 <script src="scripts/upgrades/runtime-protection.js"></script>
 <script src="scripts/upgrades/runtime-manual-recolor.js"></script>
+<!-- PDF LIBS: Hide RequireJS temporarily so jsPDF attaches to window -->
+<script>
+    if (window.define) {
+        window._tempDefine = window.define;
+        window.define = null;
+    }
+</script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
+
+<script>
+    if (window._tempDefine) {
+        window.define = window._tempDefine;
+        window._tempDefine = null;
+    }
+</script>
+
+<script src="scripts/upgrades/pdf-export.js"></script>
 </body>
 
 </html>

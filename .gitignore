@@ -1,11 +1,3 @@
 node_modules
 .js
 *.map
-dist
-.github
-.vscode
-.bat
-.ps1
-.env
-.py
-reports

@@ -1,7 +1,9 @@
 /*
- * PaintByNumbersGenerator – Runtime Manual Recolor v1.0
+ * PaintByNumbersGenerator – Runtime Manual Recolor v1.1 (Fix Live Colors)
  * 
- * Enables manual recoloring of individual facets by clicking in the finished SVG.
+ * Updates:
+ * - Fix: Das Farbwahl-Fenster zeigt nun die *tatsächliche* Farbe an, 
+ *   auch wenn diese über das "Runtime Recolor" Panel geändert wurde.
  */
 
 (() => {
@@ -57,8 +59,7 @@
       chk.checked = STATE.active;
       // Trigger change so updateCursor() runs
       chk.dispatchEvent(new Event('change', { bubbles: true }));
-}
-
+    }
 
     // Event
     $('chkManualRecolor').addEventListener('change', (e) => {
@@ -176,41 +177,46 @@
       
       // Render palette
       STATE.colorsByIndex.forEach((rgb, idx) => {
-          const colorStr = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+          // --- FIX START: Detect Live Color ---
+          // Standard original color
+          let visualColor = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+
+          // Try to find the "Live" color from the palette DOM
+          // (Runtime Recolor modifies the DOM, not the array)
+          const livePaletteItem = document.querySelector(`#palette .color[data-orig-id="${idx}"]`);
+          
+          // Fallback: search by index if data-orig-id is missing but order is preserved
+          const fallbackItem = (!livePaletteItem) ? document.querySelectorAll('#palette .color')[idx] : null;
+          
+          const targetItem = livePaletteItem || fallbackItem;
+
+          if(targetItem && targetItem.style.backgroundColor) {
+              // Retrieve the current visible color (e.g. from the Recolor Panel)
+              visualColor = targetItem.style.backgroundColor;
+          }
+          // --- FIX END ---
+
           const div = document.createElement('div');
           
           const isSelected = (idx === currentColorIdx);
           
           div.style.cssText = `
             width: 40px; height: 40px; 
-            background-color: ${colorStr};
+            background-color: ${visualColor};
             border: ${isSelected ? '3px solid red' : '1px solid #ccc'};
             cursor: pointer;
             border-radius: 4px;
             display: flex; align-items: center; justify-content: center;
             font-weight: bold;
-            color: ${getContrastYIQ(colorStr)};
+            color: ${getContrastYIQ(visualColor)};
             box-shadow: 0 2px 5px rgba(0,0,0,0.2);
           `;
           
-          // Show the "new number" from the palette DOM (safest source if reordered)
+          // Get Label
           let label = idx; 
-          const paletteDom = document.querySelectorAll('#palette .color');
-          
-          // Find the palette DOM element that corresponds to this internal index (idx)
-          // If Runtime Recolor is active, DOM elements are reordered.
-          // We look for the element with data-orig-id == idx
-          let paletteEl = null;
-          if(paletteDom && paletteDom.length > 0) {
-              // Try finding by attribute first (Runtime Recolor adds this)
-              paletteEl = Array.from(paletteDom).find(el => el.getAttribute('data-orig-id') == idx);
-              // Fallback to index position if not reordered
-              if(!paletteEl && paletteDom[idx] && !paletteDom[idx].hasAttribute('data-orig-id')) {
-                  paletteEl = paletteDom[idx];
-              }
+          if(targetItem) {
+              label = targetItem.innerText;
           }
-          
-          if(paletteEl) label = paletteEl.innerText;
 
           div.innerText = label;
           
@@ -243,8 +249,18 @@
   }
 
   function getContrastYIQ(rgbStr){
+    // Handle hex if present (though style.backgroundColor usually returns rgb())
+    if(rgbStr.startsWith('#')) {
+        rgbStr = rgbStr.replace("#", "");
+        var r = parseInt(rgbStr.substr(0,2),16);
+        var g = parseInt(rgbStr.substr(2,2),16);
+        var b = parseInt(rgbStr.substr(4,2),16);
+        var yiq = ((r*299)+(g*587)+(b*114))/1000;
+        return (yiq >= 128) ? 'black' : 'white';
+    }
+
     const parts = rgbStr.match(/\d+/g);
-    if(!parts) return 'black';
+    if(!parts || parts.length < 3) return 'black';
     const r = parseInt(parts[0]);
     const g = parseInt(parts[1]);
     const b = parseInt(parts[2]);

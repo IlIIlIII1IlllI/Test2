@@ -1,11 +1,23 @@
 # Paint by numbers generator
-Generate paint by number images (vectorized with SVG) from any input image. Orginal from https://github.com/drake7707/paintbynumbersgenerator. Trying to make some some changes.
+Generate paint by number images (vectorized with SVG) from any input image. Orginal from https://github.com/drake7707/paintbynumbersgenerator. Trying to make some some changes for a better SVG (mainly for laser engraving) and some customization.
 
-*** This project was a proof of concept for fun back in the day, it is not being actively maintained but feel free to fork and make your own changes.  ***
+*** Link to OEM [drake7077](https://github.com/drake7707/paintbynumbersgenerator).  ***
 
 ## Demo
 
-Try it out [here](https://drake7707.github.io/paintbynumbersgenerator/index.html)
+Try it out the old version [here](https://drake7707.github.io/paintbynumbersgenerator/index.html) (Drake7077)
+
+Try out updated verion [here](https://iliiliii1illli.github.io/Test2/)
+
+
+### New Things Compared to Drakes Code
+- SVG travel path optimization
+- no double vectors stacked on another
+- manuel color changes - color itself and the color of facets
+- manuel save small facets from elimination
+
+-----------------------------------------------------------------------------------------------------------------------
+here is drakes discription:
 
 ### CLI Version
 

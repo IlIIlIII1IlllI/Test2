@@ -1,9 +1,9 @@
 /*
- * PaintByNumbersGenerator – Runtime Manual Recolor v1.1 (Fix Live Colors)
+ * PaintByNumbersGenerator – Runtime Manual Recolor v1.2 (Fix Syntax Error)
  * 
  * Updates:
- * - Fix: Das Farbwahl-Fenster zeigt nun die *tatsächliche* Farbe an, 
- *   auch wenn diese über das "Runtime Recolor" Panel geändert wurde.
+ * - Fix: SyntaxError 'Identifier r has already been declared' behoben.
+ * - Fix: Das Farbwahl-Fenster zeigt nun die tatsächliche Farbe an.
  */
 
 (() => {
@@ -248,23 +248,27 @@
       });
   }
 
+  // --- FIXED FUNCTION ---
   function getContrastYIQ(rgbStr){
-    // Handle hex if present (though style.backgroundColor usually returns rgb())
+    let r, g, b;
+
+    // Case 1: Hex Color (#aabbcc)
     if(rgbStr.startsWith('#')) {
         rgbStr = rgbStr.replace("#", "");
-        var r = parseInt(rgbStr.substr(0,2),16);
-        var g = parseInt(rgbStr.substr(2,2),16);
-        var b = parseInt(rgbStr.substr(4,2),16);
-        var yiq = ((r*299)+(g*587)+(b*114))/1000;
-        return (yiq >= 128) ? 'black' : 'white';
+        r = parseInt(rgbStr.substr(0,2),16);
+        g = parseInt(rgbStr.substr(2,2),16);
+        b = parseInt(rgbStr.substr(4,2),16);
+    } 
+    // Case 2: RGB String (rgb(10, 20, 30))
+    else {
+        const parts = rgbStr.match(/\d+/g);
+        if(!parts || parts.length < 3) return 'black';
+        r = parseInt(parts[0]);
+        g = parseInt(parts[1]);
+        b = parseInt(parts[2]);
     }
 
-    const parts = rgbStr.match(/\d+/g);
-    if(!parts || parts.length < 3) return 'black';
-    const r = parseInt(parts[0]);
-    const g = parseInt(parts[1]);
-    const b = parseInt(parts[2]);
-    var yiq = ((r*299)+(g*587)+(b*114))/1000;
+    const yiq = ((r*299)+(g*587)+(b*114))/1000;
     return (yiq >= 128) ? 'black' : 'white';
   }
 
